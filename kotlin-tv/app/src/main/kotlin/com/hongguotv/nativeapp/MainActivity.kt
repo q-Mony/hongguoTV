@@ -839,7 +839,7 @@ class MainActivity: Activity() {
             playbackTitle=text("",23f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setTypeface(null,Typeface.BOLD) }; hud.addView(playbackTitle)
             playbackText=text("",15f,muted).apply { setPadding(0,dp(10),0,dp(9)) }; hud.addView(playbackText)
             progressBar=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply { max=1000; progressTintList=android.content.res.ColorStateList.valueOf(accent); progressBackgroundTintList=android.content.res.ColorStateList.valueOf(surface) }; hud.addView(progressBar,lp(-1,dp(4)))
-            hud.addView(text("确认 暂停/播放    左右 快退/快进    ↓ 选集    ↑ 更多    返回 收起 / 退出",13f,muted).apply { setPadding(0,dp(12),0,0) })
+            hud.addView(text("确认 暂停/播放    左右 快退/快进    ↓ 倍速    ↑ 更多    返回 收起 / 退出",13f,muted).apply { setPadding(0,dp(12),0,0) })
             controls=column().apply { setPadding(0,dp(12),0,0); visibility=View.GONE }; hud.addView(controls)
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
@@ -859,7 +859,7 @@ class MainActivity: Activity() {
                     it.setHandleAudioBecomingNoisy(true)
                 }
             }
-            p.setPlaybackSpeed(library.playbackSpeed)
+            p.setPlaybackSpeed(currentSeriesSpeed())
             val listener=object: Player.Listener {
                 private fun active()=player===p && generation==ticket && p.currentMediaItem?.mediaId==requestedId
                 override fun onPlaybackStateChanged(state: Int) {
@@ -1013,7 +1013,7 @@ class MainActivity: Activity() {
             p.isPlaying -> android.media.session.PlaybackState.STATE_PLAYING
             else -> android.media.session.PlaybackState.STATE_PAUSED
         }
-        mediaSession.update(data.series.title,episodeIndex,p?.duration?.coerceAtLeast(0) ?: 0,currentPosition(),library.playbackSpeed,state,episodeIndex>0,episodeIndex<data.episodes.lastIndex)
+        mediaSession.update(data.series.title,episodeIndex,p?.duration?.coerceAtLeast(0) ?: 0,currentPosition(),p?.playbackParameters?.speed ?: currentSeriesSpeed(),state,episodeIndex>0,episodeIndex<data.episodes.lastIndex)
     }
     private fun stopForSleep() {
         sleepStopped=true; requestedAutoplay=false; retryAutoplay=false; pausedForLifecycle=true
@@ -1060,10 +1060,10 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(currentSeriesSpeed())}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
-                        0 -> showSpeedPicker(more)
+                        0 -> showSeriesSpeedPicker(more)
                         1 -> showQualityPicker(more,true)
                         2 -> showFramePicker(more,true)
                         3 -> showSleepPicker(more)
@@ -1090,6 +1090,35 @@ class MainActivity: Activity() {
         dialog.setOnDismissListener {
             speedDialog=null
             if(anchor.isAttachedToWindow) { anchor.requestFocus(); if(inPlayer) showHud() }
+        }
+        dialog.show(); dialog.listView.setSelection(selected); dialog.listView.requestFocus()
+    }
+    private fun currentSeriesSpeed(): Float {
+        val seriesId=detail?.series?.id ?: return library.playbackSpeed
+        return library.playbackSpeed(seriesId)
+    }
+    private fun setCurrentSeriesSpeed(speed: Float) {
+        val data=detail ?: return
+        val next=PlaybackSpeed.normalize(speed)
+        library.setPlaybackSpeed(data.series.id,next)
+        player?.setPlaybackSpeed(next)
+        updatePlaybackText()
+        syncMediaSession()
+    }
+    private fun showSeriesSpeedPicker(anchor: View) {
+        if(speedDialog!=null) return
+        val data=detail ?: return
+        val speeds=PlaybackSpeed.options
+        val selected=speeds.indexOf(currentSeriesSpeed()).coerceAtLeast(0)
+        val dialog=AlertDialog.Builder(this).setTitle("${data.series.title} · 播放速度")
+            .setSingleChoiceItems(speeds.map(PlaybackSpeed::label).toTypedArray(),selected) { popup,index ->
+                setCurrentSeriesSpeed(speeds[index])
+                popup.dismiss()
+            }.setNegativeButton("取消",null).create()
+        speedDialog=dialog
+        dialog.setOnDismissListener {
+            speedDialog=null
+            if(anchor.isAttachedToWindow) { anchor.requestFocus(); showHud() }
         }
         dialog.show(); dialog.listView.setSelection(selected); dialog.listView.requestFocus()
     }
@@ -1183,7 +1212,7 @@ class MainActivity: Activity() {
                         KeyEvent.KEYCODE_DPAD_LEFT -> seek(-1,event.repeatCount)
                         KeyEvent.KEYCODE_DPAD_RIGHT -> seek(1,event.repeatCount)
                         KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0) togglePlayback()
-                        KeyEvent.KEYCODE_DPAD_DOWN -> if(event.repeatCount==0) showEpisodePanel(hud)
+                        KeyEvent.KEYCODE_DPAD_DOWN -> if(event.repeatCount==0) showSeriesSpeedPicker(hud)
                         KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_MENU -> if(event.repeatCount==0) showPanel()
                         else -> showHud()
                     }

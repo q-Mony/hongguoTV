@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.hongguotv.core.*
+import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -31,6 +32,7 @@ class Library(context: Context) {
     private var index: LibraryIndex? = null
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
+    private val seriesSpeeds = mutableMapOf<String, Float>()
     private var loading = false
     private var closed = false
     private val readyCallbacks = mutableListOf<() -> Unit>()
@@ -52,6 +54,7 @@ class Library(context: Context) {
                 synchronized(retiredWrites) { retiredWrites.removeAll(retired.toSet()) }
                 val values = prefs.all
                 val loaded = LibraryDisk.decode(values)
+                val loadedSeriesSpeeds = decodeSeriesSpeeds(values["seriesPlaybackSpeeds"])
                 val now = System.currentTimeMillis()
                 val cached = mutableMapOf<ContentType, CatalogPage>()
                 val stamps = mutableMapOf<ContentType, Long>()
@@ -72,15 +75,15 @@ class Library(context: Context) {
                 if (oldKeys.isNotEmpty() && migration.commit()) {
                     prefs.edit().also { edit -> oldKeys.forEach(edit::remove) }.commit()
                 }
-                Triple(loaded, cached, stamps)
+                LoadedState(loaded, cached, stamps, loadedSeriesSpeeds)
             }
             main.post {
                 loading = false
                 if (closed) { readyCallbacks.clear(); errorCallbacks.clear(); return@post }
                 val ready = readyCallbacks.toList(); readyCallbacks.clear()
                 val errors = errorCallbacks.toList(); errorCallbacks.clear()
-                result.onSuccess { (loaded, cached, stamps) ->
-                    index = loaded; homes.putAll(cached); homeSavedAt.putAll(stamps)
+                result.onSuccess { loaded ->
+                    index = loaded.index; homes.putAll(loaded.homes); homeSavedAt.putAll(loaded.homeSavedAt); seriesSpeeds.putAll(loaded.seriesSpeeds)
                     ready.forEach { it() }
                 }.onFailure { failure -> errors.forEach { it(failure) } }
             }
@@ -159,6 +162,17 @@ class Library(context: Context) {
     var playbackSpeed: Float
         get() = state().settings.speed
         set(value) { val next = PlaybackSpeed.normalize(value); if (next != playbackSpeed) { state().settings = state().settings.copy(speed = next); put("playbackSpeed", next) } }
+    fun playbackSpeed(seriesId: String): Float {
+        state()
+        return seriesSpeeds[seriesId]?.let(PlaybackSpeed::normalize) ?: playbackSpeed
+    }
+    fun setPlaybackSpeed(seriesId: String, value: Float) {
+        state()
+        val next = PlaybackSpeed.normalize(value)
+        if (seriesSpeeds[seriesId] == next) return
+        seriesSpeeds[seriesId] = next
+        put("seriesPlaybackSpeeds", encodeSeriesSpeeds())
+    }
     var frameMode: VideoFrameMode
         get() = state().settings.frame
         set(value) { if (value != frameMode) { state().settings = state().settings.copy(frame = value); put("frameMode", value.name) } }
@@ -198,5 +212,24 @@ class Library(context: Context) {
             }
         }
         return edit.commit()
+    }
+    private data class LoadedState(
+        val index: LibraryIndex,
+        val homes: Map<ContentType, CatalogPage>,
+        val homeSavedAt: Map<ContentType, Long>,
+        val seriesSpeeds: Map<String, Float>
+    )
+    private fun decodeSeriesSpeeds(raw: Any?): Map<String, Float> = runCatching {
+        val json = JSONObject(raw as? String ?: return emptyMap())
+        buildMap {
+            json.keys().forEach { id ->
+                put(id, PlaybackSpeed.normalize(json.optDouble(id, 1.0).toFloat()))
+            }
+        }
+    }.getOrDefault(emptyMap())
+    private fun encodeSeriesSpeeds(): String {
+        val json = JSONObject()
+        seriesSpeeds.toSortedMap().forEach { (id, speed) -> json.put(id, PlaybackSpeed.normalize(speed).toDouble()) }
+        return json.toString()
     }
 }
