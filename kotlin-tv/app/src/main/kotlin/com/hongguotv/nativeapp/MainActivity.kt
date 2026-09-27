@@ -157,6 +157,7 @@ class MainActivity: Activity() {
     private var playError=false
     private var lastSaved=0L
     private var quality=""
+    private var delayedBufferingGeneration=-1
     private val tick=object: Runnable {
         override fun run() {
             if(!foreground || isDestroyed) return
@@ -172,6 +173,11 @@ class MainActivity: Activity() {
     }
     private val hideHud=Runnable { if(screen=="player" && !panel && player?.isPlaying==true && !playError) hidePlaybackOverlay() }
     private val seekRunnable=Runnable { pendingSeek?.let { player?.seekTo(it) }; pendingSeek=null }
+    private val delayedBufferingRunnable=Runnable {
+        if(screen=="player" && generation==delayedBufferingGeneration && !playbackReady && !playError) {
+            playerView?.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+        }
+    }
     private fun dp(value: Number)=(value.toFloat()*resources.displayMetrics.density).toInt()
     private fun widthDp()=resources.displayMetrics.widthPixels/resources.displayMetrics.density
     private fun lp(w: Int=LinearLayout.LayoutParams.MATCH_PARENT,h: Int=LinearLayout.LayoutParams.WRAP_CONTENT)=LinearLayout.LayoutParams(w,h)
@@ -799,11 +805,12 @@ class MainActivity: Activity() {
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
-    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
+    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,autoNextTransition: Boolean=false) {
         updater.interrupt()
         val data=detail ?: return
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
         val reuse=screen=="player" && player!=null && playerView!=null && !recovering && !playError
+        val delayInitialBuffering=autoNextTransition && position==0L && autoplay && !recovering
         library.setWatched(data.series.id,false)
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
         val prefetched=if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
@@ -815,7 +822,7 @@ class MainActivity: Activity() {
             playerListener?.let { player?.removeListener(it) }; playerListener=null
             player?.stop(); player?.clearMediaItems()
             video?.close(); video=null; closeTransport(playbackHttp); playbackHttp=null
-            main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
+            main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); cancelDelayedBuffering(); pendingSeek=null
         } else releasePlayer()
         artwork.cancelPage(clearMemory=true)
         playbackHttp=claimedHttp; video=prefetched
@@ -843,6 +850,7 @@ class MainActivity: Activity() {
             controls=column().apply { setPadding(0,dp(12),0,0); visibility=View.GONE }; hud.addView(controls)
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
+        configureInitialBuffering(delayInitialBuffering)
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
@@ -870,6 +878,7 @@ class MainActivity: Activity() {
                             return
                         }
                         playbackReady=true
+                        cancelDelayedBuffering()
                         if(firstReady) { firstReady=false; readySince=android.os.SystemClock.elapsedRealtime(); android.util.Log.i("HongguoTV","Playback ready episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${readySince-playbackStarted}") }
                         if(hud.visibility==View.VISIBLE) updatePlaybackText()
                     }
@@ -877,7 +886,7 @@ class MainActivity: Activity() {
                     if(state==Player.STATE_ENDED) {
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
-                        else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
+                        else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1,autoNextTransition=true)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
                 }
@@ -901,6 +910,21 @@ class MainActivity: Activity() {
         if(http==null) return
         // Closing an idle TLS connection can write close_notify; keep it off the UI thread.
         networkCleanup.execute { http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
+    }
+    private fun configureInitialBuffering(delay: Boolean) {
+        cancelDelayedBuffering()
+        if(delay) {
+            playerView?.setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+            delayedBufferingGeneration=generation
+            main.postDelayed(delayedBufferingRunnable,3000)
+        } else {
+            playerView?.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+        }
+    }
+    private fun cancelDelayedBuffering() {
+        main.removeCallbacks(delayedBufferingRunnable)
+        delayedBufferingGeneration=-1
+        playerView?.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
     }
     private fun cancelPrefetch() {
         prefetchScope?.cancel(); prefetchScope=null
@@ -943,6 +967,7 @@ class MainActivity: Activity() {
         retryPending=true; main.postDelayed(retryRunnable,delay)
     }
     private fun playerFailure(problem: Throwable) {
+        cancelDelayedBuffering()
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); cancelPrefetch()
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
@@ -1166,6 +1191,7 @@ class MainActivity: Activity() {
     }
     private fun releasePlayer() {
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()
+        cancelDelayedBuffering()
         val wasForeground=foreground; foreground=false
         val oldPanel=episodePanel; episodePanel=null; oldPanel?.dismiss(); foreground=wasForeground
         speedDialog?.dismiss(); speedDialog=null
