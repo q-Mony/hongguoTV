@@ -1163,20 +1163,59 @@ class MainActivity: Activity() {
             return
         }
         val selected=BooleanArray(data.episodes.size) { it==episodeIndex }
-        val boxes=mutableListOf<CheckBox>()
         val columns=4
-        lateinit var scroll: ScrollView
+        val rowsPerPage=3
+        val pageSize=columns*rowsPerPage
+        val lastPage=data.episodes.lastIndex/pageSize
+        var page=if(data.episodes.size-episodeIndex<=pageSize*2) lastPage else episodeIndex/pageSize
+        val boxes=mutableListOf<CheckBox>()
+        lateinit var list: LinearLayout
+        lateinit var pageLabel: TextView
+        lateinit var previous: TextView
+        lateinit var next: TextView
         val content=column().apply { setPadding(0,0,0,dp(6)) }
         val top=row().apply { setPadding(0,0,0,dp(10)) }
         top.addView(text("选择集数（共 ${data.episodes.size} 集）",17f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-        val end=button("末尾") { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }.apply { minWidth=dp(96) }
-        top.addView(end,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)).apply { rightMargin=dp(10) })
-        val all=button("全选") { boxes.forEach { it.isChecked=true } }.apply { minWidth=dp(96) }
+        val all=button("全选") {
+            selected.indices.forEach { selected[it]=true }
+            boxes.forEach { it.isChecked=true }
+        }.apply { minWidth=dp(96) }
         top.addView(all,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)))
         content.addView(top)
-        scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=true; clipToPadding=false; setPadding(0,0,0,dp(18)) }
-        val list=column(); scroll.addView(list); content.addView(scroll,lp(-1,dp(320)))
-        data.episodes.indices.chunked(columns).forEach { chunk ->
+        val pager=row().apply { setPadding(0,dp(8),0,0) }
+        previous=button("上一页") {
+            if(page>0) { page--; renderDownloadPage(list,boxes,selected,page,pageSize,columns,pageLabel,previous,next) }
+        }.apply { minWidth=dp(96) }
+        pager.addView(previous,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)).apply { rightMargin=dp(10) })
+        pageLabel=text("",15f,muted).apply { gravity=Gravity.CENTER }
+        pager.addView(pageLabel,lp(0,dp(42)).apply { weight=1f })
+        next=button("下一页") {
+            if(page<lastPage) { page++; renderDownloadPage(list,boxes,selected,page,pageSize,columns,pageLabel,previous,next) }
+        }.apply { minWidth=dp(96) }
+        pager.addView(next,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)))
+        content.addView(pager)
+        list=column()
+        content.addView(list,lp(-1,dp(155)))
+        renderDownloadPage(list,boxes,selected,page,pageSize,columns,pageLabel,previous,next)
+        val dialog=AlertDialog.Builder(this).setTitle("${data.series.title} · 下载")
+            .setView(content)
+            .setNegativeButton("取消",null)
+            .setPositiveButton("开始下载",null)
+            .create()
+        downloadDialog=dialog
+        dialog.setOnDismissListener { downloadDialog=null; if(anchor.isAttachedToWindow) anchor.requestFocus() }
+        dialog.show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val episodes=selected.indices.filter { selected[it] }
+            if(episodes.isEmpty()) Toast.makeText(this,"请选择要下载的集数",Toast.LENGTH_SHORT).show()
+            else { dialog.dismiss(); startDownloads(data,episodes) }
+        }
+    }
+    private fun renderDownloadPage(list: LinearLayout, boxes: MutableList<CheckBox>, selected: BooleanArray, page: Int, pageSize: Int, columns: Int, pageLabel: TextView, previous: TextView, next: TextView) {
+        boxes.clear(); list.removeAllViews()
+        val from=page*pageSize
+        val to=minOf(from+pageSize,selected.size)
+        (from until to).toList().chunked(columns).forEach { chunk ->
             val line=row()
             chunk.forEach { index ->
                 val box=CheckBox(this).apply {
@@ -1191,24 +1230,11 @@ class MainActivity: Activity() {
             repeat(columns-chunk.size) { line.addView(Space(this),lp(0,dp(50)).apply { weight=1f; rightMargin=dp(10) }) }
             list.addView(line)
         }
-        val dialog=AlertDialog.Builder(this).setTitle("${data.series.title} · 下载")
-            .setView(content)
-            .setNegativeButton("取消",null)
-            .setPositiveButton("开始下载",null)
-            .create()
-        downloadDialog=dialog
-        dialog.setOnDismissListener { downloadDialog=null; if(anchor.isAttachedToWindow) anchor.requestFocus() }
-        dialog.show()
-        scroll.post {
-            val nearEnd=data.episodes.size-episodeIndex<=columns*6
-            if(nearEnd) scroll.fullScroll(View.FOCUS_DOWN)
-            else scroll.scrollTo(0,((episodeIndex/columns)-1).coerceAtLeast(0)*dp(50))
-        }
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val episodes=selected.indices.filter { selected[it] }
-            if(episodes.isEmpty()) Toast.makeText(this,"请选择要下载的集数",Toast.LENGTH_SHORT).show()
-            else { dialog.dismiss(); startDownloads(data,episodes) }
-        }
+        repeat((pageSize-(to-from)+columns-1)/columns) { list.addView(Space(this),lp(-1,dp(50))) }
+        pageLabel.text="第 ${from+1}—${to} 集"
+        val lastPage=selected.lastIndex/pageSize
+        previous.isEnabled=page>0; previous.isFocusable=page>0; previous.alpha=if(page>0) 1f else .4f
+        next.isEnabled=page<lastPage; next.isFocusable=page<lastPage; next.alpha=if(page<lastPage) 1f else .4f
     }
     private fun expectedEpisodeCount(series: Series): Int =
         Regex("""全\s*(\d+)\s*集""").find(series.badge)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
