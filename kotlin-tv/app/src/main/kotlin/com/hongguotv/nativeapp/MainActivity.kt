@@ -1164,15 +1164,18 @@ class MainActivity: Activity() {
         }
         val selected=BooleanArray(data.episodes.size) { it==episodeIndex }
         val boxes=mutableListOf<CheckBox>()
+        val columns=4
+        lateinit var scroll: ScrollView
         val content=column().apply { setPadding(0,0,0,dp(6)) }
         val top=row().apply { setPadding(0,0,0,dp(10)) }
         top.addView(text("选择集数（共 ${data.episodes.size} 集）",17f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+        val end=button("末尾") { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }.apply { minWidth=dp(96) }
+        top.addView(end,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)).apply { rightMargin=dp(10) })
         val all=button("全选") { boxes.forEach { it.isChecked=true } }.apply { minWidth=dp(96) }
         top.addView(all,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)))
         content.addView(top)
-        val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=true; clipToPadding=false; setPadding(0,0,0,dp(18)) }
+        scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=true; clipToPadding=false; setPadding(0,0,0,dp(18)) }
         val list=column(); scroll.addView(list); content.addView(scroll,lp(-1,dp(320)))
-        val columns=4
         data.episodes.indices.chunked(columns).forEach { chunk ->
             val line=row()
             chunk.forEach { index ->
@@ -1198,8 +1201,8 @@ class MainActivity: Activity() {
         dialog.show()
         scroll.post {
             val nearEnd=data.episodes.size-episodeIndex<=columns*6
-            val target=if(nearEnd) list.height else ((episodeIndex/columns)-1).coerceAtLeast(0)*dp(50)
-            scroll.scrollTo(0,target)
+            if(nearEnd) scroll.fullScroll(View.FOCUS_DOWN)
+            else scroll.scrollTo(0,((episodeIndex/columns)-1).coerceAtLeast(0)*dp(50))
         }
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val episodes=selected.indices.filter { selected[it] }
