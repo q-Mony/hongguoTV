@@ -19,6 +19,14 @@ data class DownloadedEpisode(
     val cardId get() = "download:${series.id}:$episodeIndex"
 }
 
+data class DownloadedSeriesSummary(
+    val series: Series,
+    val episodes: Int,
+    val totalEpisodes: Int,
+    val totalSize: Long,
+    val savedAt: Long
+)
+
 class DownloadStore(context: Context) {
     private val app = context.applicationContext
     private val prefs = app.getSharedPreferences("native-downloads-v1", Context.MODE_PRIVATE)
@@ -28,9 +36,14 @@ class DownloadStore(context: Context) {
         .filter { it.file.exists() && it.file.length() > 0 }
         .sortedWith(compareByDescending<DownloadedEpisode> { it.savedAt }.thenBy { it.episodeIndex })
 
-    @Synchronized fun series(): List<Series> = all().groupBy { it.series.id }.values.map { rows ->
+    @Synchronized fun summaries(): List<DownloadedSeriesSummary> = all().groupBy { it.series.id }.values.map { rows ->
         val first = rows.maxBy { it.savedAt }
-        first.series.copy(badge = "已下载 ${rows.size} 集")
+        DownloadedSeriesSummary(first.series, rows.size, expectedCount(first.series), rows.sumOf { it.size }, first.savedAt)
+    }.sortedByDescending { it.savedAt }
+
+    @Synchronized fun series(): List<Series> = summaries().map { row ->
+        val count = if(row.totalEpisodes>0) "${row.episodes}/${row.totalEpisodes}" else row.episodes.toString()
+        row.series.copy(badge = "已下载 $count 集 · ${formatSize(row.totalSize)}")
     }
 
     @Synchronized fun episodes(seriesId: String): List<DownloadedEpisode> =
@@ -82,5 +95,16 @@ class DownloadStore(context: Context) {
                 .put("size", item.size))
         }
         prefs.edit().putString("items", array.toString()).apply()
+    }
+
+    companion object {
+        fun expectedCount(series: Series): Int =
+            Regex("""全\s*(\d+)\s*集""").find(series.badge)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+        fun formatSize(bytes: Long): String {
+            val value = bytes.coerceAtLeast(0)
+            return if(value >= 1024L*1024L*1024L) "%.1fGB".format(value/(1024.0*1024.0*1024.0))
+            else "%.1fMB".format(value/(1024.0*1024.0))
+        }
     }
 }
