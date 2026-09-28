@@ -1148,14 +1148,25 @@ class MainActivity: Activity() {
         }.apply { tag="playback-settings" }
         play.requestFocus()
     }
-    private fun showDownloadPicker(anchor: View) {
+    private fun showDownloadPicker(anchor: View, refreshIfIncomplete: Boolean=true) {
         if(downloadDialog!=null) return
         val data=detail ?: return
+        val expected=expectedEpisodeCount(data.series)
+        if(refreshIfIncomplete && expected>data.episodes.size) {
+            Toast.makeText(this,"正在刷新完整剧集列表…",Toast.LENGTH_SHORT).show()
+            work({ repository.detail(data.series.id) }, { refreshed ->
+                detail=refreshed
+                showDownloadPicker(anchor,false)
+            }, {
+                showDownloadPicker(anchor,false)
+            })
+            return
+        }
         val selected=BooleanArray(data.episodes.size) { it==episodeIndex }
         val boxes=mutableListOf<CheckBox>()
         val content=column().apply { setPadding(0,0,0,dp(6)) }
         val top=row().apply { setPadding(0,0,0,dp(10)) }
-        top.addView(text("选择集数",17f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+        top.addView(text("选择集数（共 ${data.episodes.size} 集）",17f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
         val all=button("全选") { boxes.forEach { it.isChecked=true } }.apply { minWidth=dp(96) }
         top.addView(all,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)))
         content.addView(top)
@@ -1185,13 +1196,19 @@ class MainActivity: Activity() {
         downloadDialog=dialog
         dialog.setOnDismissListener { downloadDialog=null; if(anchor.isAttachedToWindow) anchor.requestFocus() }
         dialog.show()
-        scroll.post { scroll.scrollTo(0,((episodeIndex/columns)-1).coerceAtLeast(0)*dp(50)) }
+        scroll.post {
+            val nearEnd=data.episodes.size-episodeIndex<=columns*6
+            val target=if(nearEnd) list.height else ((episodeIndex/columns)-1).coerceAtLeast(0)*dp(50)
+            scroll.scrollTo(0,target)
+        }
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val episodes=selected.indices.filter { selected[it] }
             if(episodes.isEmpty()) Toast.makeText(this,"请选择要下载的集数",Toast.LENGTH_SHORT).show()
             else { dialog.dismiss(); startDownloads(data,episodes) }
         }
     }
+    private fun expectedEpisodeCount(series: Series): Int =
+        Regex("""全\s*(\d+)\s*集""").find(series.badge)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
     private fun startDownloads(data: Detail, episodes: List<Int>) {
         Toast.makeText(this,"开始下载 ${episodes.size} 集，默认最高画质",Toast.LENGTH_LONG).show()
         io.submit {
