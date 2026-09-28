@@ -160,7 +160,7 @@ class MainActivity: Activity() {
     private var sleepButton: TextView?=null
     private var speedDialog: AlertDialog?=null
     private var downloadDialog: AlertDialog?=null
-    private enum class DownloadPhase { QUEUED, RUNNING, DONE, FAILED }
+    private enum class DownloadPhase { QUEUED, RUNNING, DONE, FAILED, CANCELLED }
     private data class DownloadTask(val series: Series,val episodeId: String,val episodeIndex: Int,val totalEpisodes: Int,@Volatile var phase: DownloadPhase,@Volatile var bytes: Long=0,@Volatile var total: Long=0,@Volatile var message: String="")
     private val downloadLimit=Semaphore(5)
     private val downloadTasks=ConcurrentHashMap<String,DownloadTask>()
@@ -767,7 +767,7 @@ class MainActivity: Activity() {
         downloadStatusViews.clear()
         val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false; clipToPadding=false }
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
-        val active=downloadTasks.values.filter { it.phase!=DownloadPhase.DONE }.groupBy { it.series.id }
+        val active=downloadTasks.values.filter { it.phase!=DownloadPhase.DONE && it.phase!=DownloadPhase.CANCELLED }.groupBy { it.series.id }
         val completed=downloads.summaries()
         if(active.isEmpty() && completed.isEmpty()) {
             message(list,"下载完成的视频会出现在这里")
@@ -784,6 +784,9 @@ class MainActivity: Activity() {
                 val status=text(downloadStatusText(task.series.id),13f,accent).apply { setPadding(0,dp(5),0,0); maxLines=1; ellipsize=TextUtils.TruncateAt.END }
                 title.addView(status); downloadStatusViews[task.series.id]=status
                 line.addView(title,lp(0,-2).apply { weight=1f })
+                lateinit var remove: TextView
+                remove=button("删除") { deleteDownloadedSeries(task.series,remove) }
+                line.addView(remove,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(44)).apply { leftMargin=dp(12) })
                 list.addView(line,lp(-1,-2).apply { bottomMargin=dp(10) })
             }
         }
@@ -802,6 +805,9 @@ class MainActivity: Activity() {
                 line.addView(info,lp(0,-2).apply { weight=1f })
                 val open=button("管理") { showDownloadedSeries(summary.series) }
                 line.addView(open,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(44)).apply { leftMargin=dp(12) })
+                lateinit var remove: TextView
+                remove=button("删除") { deleteDownloadedSeries(summary.series,remove) }
+                line.addView(remove,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(44)).apply { leftMargin=dp(8) })
                 line.setOnClickListener { showDownloadedSeries(summary.series) }
                 list.addView(line,lp(-1,-2).apply { bottomMargin=dp(12) })
             }
@@ -850,17 +856,51 @@ class MainActivity: Activity() {
         val heading=row().apply { setPadding(0,dp(12),0,dp(10)) }
         addButton(heading,"‹ 返回下载") { showCatalog() }
         heading.addView(text(series.title,25f).apply { setTypeface(null,Typeface.BOLD); maxLines=1; ellipsize=TextUtils.TruncateAt.END },lp(0,-2).apply { weight=1f })
+        lateinit var deleteAll: TextView
+        deleteAll=addButton(heading,"删除整部") { deleteDownloadedSeries(series,deleteAll) }
         body.addView(heading)
-        body.addView(text("已下载 ${rows.size} 集 · ${DownloadStore.formatSize(rows.sumOf { it.size })}，点击即可离线播放。",14f,muted).apply { setPadding(0,0,0,dp(12)) })
+        body.addView(text("已下载 ${rows.size} 集 · ${DownloadStore.formatSize(rows.sumOf { it.size })}，点击即可离线播放；长按单集可删除。",14f,muted).apply { setPadding(0,0,0,dp(12)) })
         val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }; val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
         rows.chunked(8).forEach { chunk ->
             val line=row()
             chunk.forEach { item ->
-                line.addView(button("第 ${item.episodeIndex+1} 集",false) { playDownloaded(item) },lp(0,dp(46)).apply { weight=1f; rightMargin=dp(7) })
+                val episodeButton=button("第 ${item.episodeIndex+1} 集",false) { playDownloaded(item) }.apply {
+                    setOnLongClickListener { deleteDownloadedEpisode(item,this); true }
+                }
+                line.addView(episodeButton,lp(0,dp(46)).apply { weight=1f; rightMargin=dp(7) })
             }
             repeat(8-chunk.size) { line.addView(Space(this),lp(0,dp(46)).apply { weight=1f; rightMargin=dp(7) }) }
             list.addView(line,lp(-1,dp(52)))
         }
+    }
+    private fun deleteDownloadedSeries(series: Series,anchor: View?) {
+        val saved=downloads.episodes(series.id)
+        val active=downloadTasks.values.count { it.series.id==series.id && it.phase!=DownloadPhase.DONE && it.phase!=DownloadPhase.CANCELLED }
+        if(saved.isEmpty() && active==0) { Toast.makeText(this,"没有可删除的下载内容",Toast.LENGTH_SHORT).show(); return }
+        val size=DownloadStore.formatSize(saved.sumOf { it.size })
+        val message=buildString {
+            append("删除《${series.title}》已下载的 ${saved.size} 集")
+            if(saved.isNotEmpty()) append(" · $size")
+            append("？")
+            if(active>0) append("\n\n同时取消 $active 个正在等待或下载中的任务。")
+        }
+        tvTools.confirm("删除下载",message,anchor) {
+            cancelDownloadTasks(series.id)
+            val removed=downloads.deleteSeries(series.id)
+            Toast.makeText(this,"已删除 $removed 集",Toast.LENGTH_SHORT).show()
+            if(screen=="detail") showCatalog() else if(screen=="catalog" && tab==5) showCatalog()
+        }
+    }
+    private fun deleteDownloadedEpisode(item: DownloadedEpisode,anchor: View?) {
+        tvTools.confirm("删除单集","删除《${item.series.title}》第 ${item.episodeIndex+1} 集？",anchor) {
+            val removed=downloads.deleteEpisode(item.series.id,item.episodeId)
+            Toast.makeText(this,if(removed) "已删除第 ${item.episodeIndex+1} 集" else "这一集已经不存在",Toast.LENGTH_SHORT).show()
+            if(downloads.episodes(item.series.id).isEmpty()) showCatalog() else showDownloadedSeries(item.series)
+        }
+    }
+    private fun cancelDownloadTasks(seriesId: String) {
+        downloadTasks.values.filter { it.series.id==seriesId }.forEach { it.phase=DownloadPhase.CANCELLED }
+        downloadTasks.keys.filter { key -> downloadTasks[key]?.series?.id==seriesId }.forEach { downloadTasks.remove(it) }
     }
     private fun playDownloaded(item: DownloadedEpisode) {
         val rows=downloads.episodes(item.series.id)
@@ -1344,9 +1384,11 @@ class MainActivity: Activity() {
             io.submit {
                 downloadLimit.acquire()
                 try {
+                    if(task.phase==DownloadPhase.CANCELLED) return@submit
                     task.phase=DownloadPhase.RUNNING; task.message=""; main.post { scheduleDownloadUi() }
                     runCatching { downloadEpisode(data,index,task) }
                         .onSuccess {
+                            if(task.phase==DownloadPhase.CANCELLED) return@onSuccess
                             task.phase=DownloadPhase.DONE; task.bytes=task.total.coerceAtLeast(task.bytes)
                             main.post { Toast.makeText(this,"已下载 第 ${index+1} 集",Toast.LENGTH_SHORT).show(); scheduleDownloadUi() }
                         }
@@ -1372,6 +1414,7 @@ class MainActivity: Activity() {
             FileOutputStream(temp).use { out ->
                 var position=0L
                 while(position<remote.total) {
+                    check(task?.phase!=DownloadPhase.CANCELLED) { "下载已取消" }
                     val bytes=remote.read(position,minOf(1024*1024L,remote.total-position).toInt())
                     if(bytes.isEmpty()) break
                     out.write(bytes); position+=bytes.size
@@ -1379,6 +1422,7 @@ class MainActivity: Activity() {
                     main.post { scheduleDownloadUi() }
                 }
             }
+            check(task?.phase!=DownloadPhase.CANCELLED) { "下载已取消" }
             if(target.exists()) target.delete()
             check(temp.renameTo(target)) { "保存文件失败" }
             downloads.put(DownloadedEpisode(data.series,episodeId,index,target,remote.info.quality,System.currentTimeMillis(),target.length()))

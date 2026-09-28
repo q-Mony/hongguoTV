@@ -60,9 +60,37 @@ class DownloadStore(context: Context) {
         save(rows)
     }
 
+    @Synchronized fun deleteEpisode(seriesId: String, episodeId: String): Boolean {
+        val rows = all()
+        val target = rows.firstOrNull { it.series.id == seriesId && it.episodeId == episodeId } ?: return false
+        deleteFiles(target)
+        save(rows.filterNot { it.series.id == seriesId && it.episodeId == episodeId })
+        cleanSeriesDir(seriesId)
+        return true
+    }
+
+    @Synchronized fun deleteSeries(seriesId: String): Int {
+        val rows = all()
+        val targets = rows.filter { it.series.id == seriesId }
+        targets.forEach(::deleteFiles)
+        save(rows.filterNot { it.series.id == seriesId })
+        cleanSeriesDir(seriesId)
+        return targets.size
+    }
+
     fun targetFile(seriesId: String, episodeId: String): File {
         val dir = File(directory, seriesId).apply { mkdirs() }
         return File(dir, "$episodeId.mp4")
+    }
+
+    private fun deleteFiles(item: DownloadedEpisode) {
+        runCatching { if(item.file.exists()) item.file.delete() }
+        runCatching { File(item.file.parentFile, "${item.file.name}.download").takeIf { it.exists() }?.delete() }
+    }
+
+    private fun cleanSeriesDir(seriesId: String) {
+        val dir = File(directory, seriesId)
+        runCatching { if(dir.exists() && dir.listFiles().isNullOrEmpty()) dir.delete() }
     }
 
     private fun decode(): List<DownloadedEpisode> = runCatching {
