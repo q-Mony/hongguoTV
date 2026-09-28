@@ -1153,25 +1153,28 @@ class MainActivity: Activity() {
         val data=detail ?: return
         val selected=BooleanArray(data.episodes.size) { it==episodeIndex }
         val boxes=mutableListOf<CheckBox>()
-        val content=column()
-        val top=row().apply { setPadding(0,0,0,dp(8)) }
-        top.addView(text("选择要下载的集数",18f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-        val all=button("全选") { boxes.forEach { it.isChecked=true } }
-        top.addView(all,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(44)))
+        val content=column().apply { setPadding(0,0,0,dp(6)) }
+        val top=row().apply { setPadding(0,0,0,dp(10)) }
+        top.addView(text("选择集数",17f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+        val all=button("全选") { boxes.forEach { it.isChecked=true } }.apply { minWidth=dp(96) }
+        top.addView(all,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)))
         content.addView(top)
-        val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=true }
-        val list=column(); scroll.addView(list); content.addView(scroll,lp(-1,dp(360)))
-        data.episodes.indices.chunked(5).forEach { chunk ->
+        val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=true; clipToPadding=false; setPadding(0,0,0,dp(18)) }
+        val list=column(); scroll.addView(list); content.addView(scroll,lp(-1,dp(320)))
+        val columns=4
+        data.episodes.indices.chunked(columns).forEach { chunk ->
             val line=row()
             chunk.forEach { index ->
                 val box=CheckBox(this).apply {
                     text="第 ${index+1} 集"; textSize=15f; setTextColor(white); isChecked=selected[index]
+                    maxLines=1; ellipsize=TextUtils.TruncateAt.END; minHeight=dp(48); gravity=Gravity.CENTER_VERTICAL
+                    setPadding(0,0,dp(8),0)
                     setOnCheckedChangeListener { _,checked -> selected[index]=checked }
                 }
                 boxes+=box
-                line.addView(box,lp(0,dp(44)).apply { weight=1f })
+                line.addView(box,lp(0,dp(50)).apply { weight=1f; rightMargin=dp(10) })
             }
-            repeat(5-chunk.size) { line.addView(Space(this),lp(0,dp(44)).apply { weight=1f }) }
+            repeat(columns-chunk.size) { line.addView(Space(this),lp(0,dp(50)).apply { weight=1f; rightMargin=dp(10) }) }
             list.addView(line)
         }
         val dialog=AlertDialog.Builder(this).setTitle("${data.series.title} · 下载")
@@ -1182,6 +1185,7 @@ class MainActivity: Activity() {
         downloadDialog=dialog
         dialog.setOnDismissListener { downloadDialog=null; if(anchor.isAttachedToWindow) anchor.requestFocus() }
         dialog.show()
+        scroll.post { scroll.scrollTo(0,((episodeIndex/columns)-1).coerceAtLeast(0)*dp(50)) }
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val episodes=selected.indices.filter { selected[it] }
             if(episodes.isEmpty()) Toast.makeText(this,"请选择要下载的集数",Toast.LENGTH_SHORT).show()
