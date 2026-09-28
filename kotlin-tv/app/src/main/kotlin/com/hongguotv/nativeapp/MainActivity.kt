@@ -29,6 +29,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
+import java.util.concurrent.atomic.AtomicInteger
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MainActivity: Activity() {
@@ -1367,7 +1368,6 @@ class MainActivity: Activity() {
     private fun expectedEpisodeCount(series: Series): Int =
         Regex("""全\s*(\d+)\s*集""").find(series.badge)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
     private fun startDownloads(data: Detail, episodes: List<Int>) {
-        Toast.makeText(this,"开始下载 ${episodes.size} 集，默认最高画质",Toast.LENGTH_LONG).show()
         val totalEpisodes=data.episodes.size
         val pending=mutableListOf<Int>()
         episodes.forEach { index ->
@@ -1375,6 +1375,31 @@ class MainActivity: Activity() {
             if(downloads.find(data.series.id,episodeId)?.file?.exists()==true) return@forEach
             val key=downloadKey(data.series.id,episodeId)
             if(downloadTasks.putIfAbsent(key,DownloadTask(data.series,episodeId,index,totalEpisodes,DownloadPhase.QUEUED))==null) pending+=index
+        }
+        if(pending.isEmpty()) {
+            Toast.makeText(this,"《${data.series.title}》所选剧集已下载完成",Toast.LENGTH_SHORT).show()
+            return
+        }
+        val finished=AtomicInteger(0)
+        val failed=AtomicInteger(0)
+        val cancelled=AtomicInteger(0)
+        fun finishOne(task: DownloadTask, success: Boolean) {
+            if(task.phase==DownloadPhase.CANCELLED) cancelled.incrementAndGet()
+            else if(!success) failed.incrementAndGet()
+            if(finished.incrementAndGet()!=pending.size) return
+            main.post {
+                scheduleDownloadUi()
+                val failedCount=failed.get()
+                val cancelledCount=cancelled.get()
+                val title=data.series.title
+                val message=when {
+                    failedCount==0 && cancelledCount==0 -> "《$title》已完成下载"
+                    cancelledCount>0 && failedCount==0 -> "《$title》下载已取消 $cancelledCount 集"
+                    cancelledCount>0 -> "《$title》下载结束，失败 $failedCount 集，取消 $cancelledCount 集"
+                    else -> "《$title》下载结束，失败 $failedCount 集"
+                }
+                Toast.makeText(this,message,Toast.LENGTH_LONG).show()
+            }
         }
         if(screen=="catalog" && tab==5) showCatalog()
         pending.forEach { index ->
@@ -1384,17 +1409,21 @@ class MainActivity: Activity() {
             io.submit {
                 downloadLimit.acquire()
                 try {
-                    if(task.phase==DownloadPhase.CANCELLED) return@submit
+                    if(task.phase==DownloadPhase.CANCELLED) { finishOne(task,false); return@submit }
                     task.phase=DownloadPhase.RUNNING; task.message=""; main.post { scheduleDownloadUi() }
                     runCatching { downloadEpisode(data,index,task) }
                         .onSuccess {
-                            if(task.phase==DownloadPhase.CANCELLED) return@onSuccess
+                            if(task.phase==DownloadPhase.CANCELLED) { finishOne(task,false); return@onSuccess }
                             task.phase=DownloadPhase.DONE; task.bytes=task.total.coerceAtLeast(task.bytes)
-                            main.post { Toast.makeText(this,"已下载 第 ${index+1} 集",Toast.LENGTH_SHORT).show(); scheduleDownloadUi() }
+                            main.post { scheduleDownloadUi() }
+                            finishOne(task,true)
                         }
                         .onFailure { problem ->
-                            task.phase=DownloadPhase.FAILED; task.message=problem.message ?: "未知错误"
-                            main.post { Toast.makeText(this,"第 ${index+1} 集下载失败：${task.message}",Toast.LENGTH_LONG).show(); scheduleDownloadUi() }
+                            if(task.phase!=DownloadPhase.CANCELLED) {
+                                task.phase=DownloadPhase.FAILED; task.message=problem.message ?: "未知错误"
+                            }
+                            main.post { scheduleDownloadUi() }
+                            finishOne(task,false)
                         }
                 } finally {
                     downloadLimit.release()
