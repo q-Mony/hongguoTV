@@ -80,7 +80,7 @@ class PhoneSearchServer(
             return respond(socket,200,"""<h1>在电视上搜索</h1><p>输入剧名，电视会按当前选择的漫剧或短剧分类搜索。</p><form method="post" action="/$token/submit"><input name="query" maxlength="80" required autofocus placeholder="输入剧名或关键词" autocomplete="off"><button>发送到电视</button></form><p>页面仅在电视的手机输入窗口打开期间有效，最长 5 分钟。</p>""")
         }
         if(request[0]!="POST" || request[1]!="/$token/submit") return respond(socket,405,"不支持的操作")
-        if(headers["origin"]!=null && headers["origin"]!="http://$host") return respond(socket,403,"来源不匹配")
+        if(!allowedOrigin(headers["origin"])) return respond(socket,403,"来源不匹配")
         if(headers.containsKey("transfer-encoding") || headers["content-type"]?.substringBefore(';')!="application/x-www-form-urlencoded") return respond(socket,400,"请求格式错误")
         val length=headers["content-length"]?.toIntOrNull()?.takeIf { it in 1..4096 } ?: return respond(socket,413,"输入内容过长")
         val body=ByteArray(length); var offset=0
@@ -97,5 +97,9 @@ class PhoneSearchServer(
         val body="""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>红果 TV · 手机输入</title><style>body{font:18px sans-serif;background:#10131b;color:#f4f5f8;max-width:500px;margin:40px auto;padding:20px}input,button{box-sizing:border-box;width:100%;font:inherit;padding:16px;margin:10px 0;border-radius:8px}button{background:#ff634c;color:white;border:0}p{line-height:1.6}</style></head><body>$message</body></html>""".toByteArray(Charsets.UTF_8)
         val header="HTTP/1.1 $code Response\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${body.size}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n"
         socket.getOutputStream().apply { write(header.toByteArray(Charsets.US_ASCII)); write(body); flush() }
+    }
+    private fun allowedOrigin(value: String?): Boolean {
+        if(value==null || value=="null") return true
+        return value.trimEnd('/')=="http://$host"
     }
 }

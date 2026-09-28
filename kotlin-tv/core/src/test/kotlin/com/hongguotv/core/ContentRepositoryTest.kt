@@ -231,7 +231,19 @@ class ContentRepositoryTest {
         var requests=0
         val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":11,"data":[]}]}""" }
         assertThrows(IOException::class.java) { repo.search("修仙",1,ContentType.COMIC) }
-        assertEquals(1,requests)
+        assertEquals(2,requests)
+    }
+
+    @Test fun comicSearchFallsBackToWebsiteWhenAppEndpointReturnsEmptyBody() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            if(paths.size==1) ""
+            else """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"789","series_name":"网页漫剧"}]}}}};</script>"""
+        }
+        assertEquals("789",repo.search("修仙",1,ContentType.COMIC).items.single().id)
+        assertEquals("/reading/bookapi/search/tab/v",paths.first())
+        assertTrue(paths.last().startsWith("/search/"))
     }
 
     @Test fun shortSearchKeepsWebsiteFallback() {

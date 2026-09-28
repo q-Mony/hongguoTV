@@ -39,6 +39,14 @@ class PhoneSearchServerTest {
             assertFalse(submitted)
         }
     }
+    @Test fun `privacy browsers with null origin can submit the one time token form`() {
+        val received=CountDownLatch(1); var query=""
+        PhoneSearchServer("127.0.0.1",{ query=it;received.countDown() }).use { server ->
+            val reply=request(server,"POST",URI(server.url).path+"/submit","query="+URLEncoder.encode("斗罗","UTF-8"),"Origin: null\r\n")
+            assertTrue(reply.startsWith("HTTP/1.1 200"))
+            assertTrue(received.await(2,TimeUnit.SECONDS)); assertEquals("斗罗",query)
+        }
+    }
     @Test fun `invalid and oversized input does not consume the session`() {
         PhoneSearchServer("127.0.0.1",{}).use { server ->
             for(body in listOf("query=","query="+"x".repeat(81),"query=a&query=b","query=hello%0Aworld","query=%zz")) {
