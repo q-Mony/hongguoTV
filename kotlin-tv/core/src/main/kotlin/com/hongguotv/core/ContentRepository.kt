@@ -26,9 +26,20 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val signer = Signer()
+    private val fallbackSigner = FallbackSigner()
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
+
+    /**
+     * Issue a signed request and return its body, or null if the request failed at the transport
+     * level. Signing happens once per attempt: the signature covers the ticket and query, so the URL
+     * and headers must come from the same [Signer.Request].
+     */
+    private fun signedBody(sign: (String,Map<String,String>,ByteArray?)->Signer.Request, base: String, values: Map<String,String>, body: ByteArray?): String? {
+        val request=sign(base,values,body)
+        return try { text(request.url,request) } catch(e: Exception) { null }
+    }
     private fun text(url: String, signed: Signer.Request? = null): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
@@ -93,7 +104,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             if(it.passback.isNotBlank()) values["passback"]=it.passback
             it.offset?.takeIf { offset -> offset>=0 }?.let { offset -> values["offset"]=offset.toString() }
         }
-        val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v",values)
+        val endpoint="https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v"
+        // Search deliberately does NOT escalate to the fallback signer: it was measured to fail under
+        // both schemes (the route itself is not serving data), so escalating would only add a doomed
+        // request to every search. The website search below is the real fallback for this path.
+        val signed=signer.sign(endpoint,values,null)
         val raw=text(signed.url,signed)
         if(raw.isBlank()) throw IOException("${type.label}搜索暂不可用")
         val data=runCatching { JSONObject(raw) }.getOrElse { throw IOException("${type.label}搜索暂不可用") }
@@ -126,32 +141,111 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
         return Detail(card(o).copy(id=id),episodes)
     }
+    private data class PlayVariant(val quality: Int, val codec: String, val url: String, val spade: String, val seed: String)
+    // The player model has shipped in two shapes: a modern inline video_list (plain main_url plus
+    // encrypt_info.spade_a) and a legacy fallback_api whose video_info must be fetched separately and
+    // whose main_url is key_seed encrypted. Accept both so a server-side switch never blanks playback.
+    private fun variants(items: List<JSONObject>, seed: String): List<PlayVariant> = items.mapNotNull { item ->
+        val meta=item.optJSONObject("video_meta") ?: JSONObject()
+        val definition=meta.str("definition").ifEmpty { meta.str("quality") }.ifEmpty { item.str("definition") }.ifEmpty { item.str("quality_type") }.ifEmpty { meta.optInt("vheight",0).toString() }
+        PlayVariant(qualityNumber(definition),meta.str("codec_type").ifEmpty { item.str("codec_type") },item.str("main_url"),
+            item.optJSONObject("encrypt_info")?.str("spade_a")?.ifEmpty { item.str("spade_a") } ?: item.str("spade_a"),seed)
+    // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor.
+    // Keep missing legacy codec labels usable, but never select a known incompatible variant.
+    }.filter { it.url.isNotEmpty() && it.codec.lowercase() !in setOf("bytevc2","bvc2") }
+    private fun fallbackUrl(model: JSONObject): String? {
+        val raw=model.opt("fallback_api") ?: return null
+        val value=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
+        return value.takeIf { it.startsWith("https://") }
+    }
+    /** Parse a player-model response body into the model, or null when it carries no usable data. */
+    private fun parsePlayerModel(body: String?, id: String): JSONObject? {
+        if(body.isNullOrEmpty()) return null
+        val data=runCatching { JSONObject(body) }.getOrNull() ?: return null
+        if(data.optInt("Code",data.optInt("code",0))!=0) return null
+        val map=data.optJSONObject("data") ?: return null
+        val entry=when {
+            map.has("video_model") -> map
+            map.optJSONObject(id)?.has("video_model")==true -> map.getJSONObject(id)
+            else -> map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull { it.has("video_model") } ?: return null
+        }
+        val text=entry.str("video_model")
+        if(text.isEmpty()) return null
+        return runCatching { JSONObject(text) }.getOrNull()
+    }
+    /**
+     * Fetch the player model from one route under one signature scheme, or null if the response
+     * carried no usable model.
+     *
+     * Upstream signals a rejected request with HTTP 200 and a data-less body, so "did it parse into a
+     * model" is the test -- a transport error and a refusal are both just null here.
+     */
+    private fun playerModelOrNull(sign: (String,Map<String,String>,ByteArray?)->Signer.Request, values: Map<String,String>, base: String, payload: String, id: String): JSONObject? =
+        parsePlayerModel(signedBody(sign,base,values,payload.toByteArray()),id)
+
+    // Public unencrypted 360p rendition served straight from the site. The signed player API has
+    // recurring outages (110001 / empty body), and this path keeps playback working during them.
+    // Not every episode has one, so probe it first: a dead URL here would look like a codec failure.
+    private fun publicFallback(id: String): StreamInfo {
+        val url="$site/video/public/$id/360p.mp4"
+        val request=Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Range","bytes=0-0").build()
+        val code=RequestScope.execute(http.newCall(request)) { it.code }
+        if(code!=200 && code!=206) throw IOException("公开播放资源不可用（HTTP $code）")
+        return StreamInfo(url,null,"360P（公开版）")
+    }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",VendorConstants.device,payload)
-        val data=JSONObject(text(signed.url,signed))
-        if(data.optInt("Code",data.optInt("code",0))!=0) throw IOException("播放接口暂不可用")
-        val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val entry=map.optJSONObject(id) ?: map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull() ?: throw IOException("播放信息为空")
-        val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
-        val raw=model.opt("fallback_api")
-        val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
-        if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
-        val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
-        val videoList=info.optJSONObject("video_list") ?: throw IOException("没有可用清晰度")
-        // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor.
-        // Keep missing legacy codec labels usable, but never select a known incompatible variant.
-        val rows=videoList.keys().asSequence().mapNotNull { k -> videoList.optJSONObject(k)?.let { k to it } }.filter {
-            it.second.str("main_url").isNotEmpty() && it.second.str("codec_type").lowercase() !in setOf("bytevc2","bvc2")
-        }.map { (k,o) -> Triple(qualityNumber(o.str("quality_desc").ifEmpty { o.str("height").ifEmpty { o.str("vheight").ifEmpty { o.str("quality").ifEmpty { k } } } }),k,o) }.sortedByDescending { it.first }.toList()
-        val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val item=selected.third; var url=cleanUrl(item.str("main_url")); val seed=info.str("key_seed")
-        if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(seed))
-        if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
-        val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
-        val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality)
+        val biz="""{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024}"""
+        // /novel/player/multi_video_model/v1/ and /novel/player/video_model/v1/ now both answer
+        // HTTP 200 with an empty body: the upstream retired them. preload is the route that still
+        // returns the player model, and it is the only one that offers 720P/1080P.
+        val sources=listOf(
+            "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/" to """{"biz_param":$biz,"mixed_video_id_map":{"1004":["$id"]}}""",
+            "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/" to """{"biz_param":$biz,"mixed_video_id_map":{"1004":["$id"]}}"""
+        )
+        // Scheme A is the default and covers every route before scheme B is considered at all, so the
+        // fallback signer stays a genuine last resort rather than a per-route tax.
+        val schemes=listOf(
+            signer::sign to VendorConstants.device,
+            fallbackSigner::sign to fallbackSigner.query()
+        )
+        var failure: IOException?=null
+        for((sign,values) in schemes) {
+            for((base,payload) in sources) {
+                val rows=try {
+                    val model=playerModelOrNull(sign,values,base,payload,id) ?: throw IOException("播放接口暂不可用")
+                    val status=model.optInt("status",-1)
+                    if(status!=10) throw IOException("播放状态异常：$status ${model.str("message")}".trim())
+                    var found=model.optJSONArray("video_list")?.let { variants(it.objects(),"") } ?: emptyList()
+                    if(found.isEmpty()) {
+                        val fallback=fallbackUrl(model) ?: throw IOException("没有可用清晰度")
+                        val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
+                        val list=info.optJSONObject("video_list") ?: throw IOException("没有可用清晰度")
+                        found=variants(list.keys().asSequence().mapNotNull { list.optJSONObject(it) }.toList(),info.str("key_seed"))
+                    }
+                    found
+                } catch(e: Exception) { failure=IOException(e.message ?: "播放接口暂不可用",e); continue }
+                val ordered=rows.sortedByDescending { it.quality }
+                val selected=ordered.firstOrNull { it.quality<=maxQuality } ?: ordered.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+                var url=cleanUrl(selected.url)
+                if(!url.startsWith("https://") && !url.startsWith("http://") && selected.seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(selected.seed))
+                if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
+                val key=selected.spade.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
+                val quality=if(selected.quality>0) "${selected.quality}P"+(if(selected.quality>maxQuality) "（兼容资源）" else "") else "自动"
+                return StreamInfo(url,key,quality)
+            }
+        }
+        // Both signature schemes and every route were refused. That is the one situation that may
+        // mean the device identity is flagged, so offer it for rotation -- rate-limited internally,
+        // because a sustained upstream outage looks identical from here and must not churn devices.
+        val rotated=DeviceFingerprint.rotateIfRejected()
+        if(rotated!=null) {
+            val retry=runCatching { stream(id,maxQuality) }.getOrNull()
+            if(retry!=null) return retry
+        }
+        // Still nothing: fall back to the public rendition instead of refusing to play.
+        // If that episode has no public copy either, surface the signed-API error, which is the real cause.
+        return try { publicFallback(id) } catch(e: Exception) { throw failure ?: e }
     }
     companion object {
         fun extractRouter(html: String): JSONObject {
