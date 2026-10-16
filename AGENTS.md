@@ -16,9 +16,11 @@
 - **Download（手机下载）功能由 `feature/mobile-downloads-touch` 专属承载**：
   其他功能分支不需要、也不得引入下载代码（`DownloadStore.kt`、「我的下载」
   入口、下载选集等）；下载相关的改动只提交到该分支。
-- 现状事实：`my-release` 与本地 `main` 因历史合并**已包含**下载功能
-  （正式包 0.9.1 带「我的下载」）；若要求主分支移除下载，另行处理，
-  不要顺手把下载代码扩散到 `feature/series-speed-menu` 或
+- 现状事实（2026-10-16 起）：`my-release` 与本地 `main` **已移除**下载功能
+  （`DownloadStore.kt` 删除、`MainActivity.kt` 回退到合并前版本，触摸播放
+  控制随之一并移除）；主分支保留播放接口修复、倍速、缓冲延迟、搜索兜底。
+  下载相关改动只提交到 `feature/mobile-downloads-touch`，**不要**再把它
+  合并回 `my-release`，也不要扩散到 `feature/series-speed-menu` 或
   `fix/play-api-recovery`。
 - 触摸播放控制（点击暂停/长按更多）随下载分支引入，同样只属于
   `feature/mobile-downloads-touch`。

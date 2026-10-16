@@ -12,7 +12,6 @@ import android.graphics.drawable.GradientDrawable
 import android.view.*
 import android.view.inputmethod.InputMethodManager
 import android.content.Context
-import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -22,21 +21,16 @@ import androidx.media3.common.*
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.ui.PlayerView
 import com.hongguotv.core.*
-import java.io.FileOutputStream
 import java.util.concurrent.Executors
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Semaphore
-import java.util.concurrent.atomic.AtomicInteger
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MainActivity: Activity() {
     private val bg=TvStyle.background; private val surface=TvStyle.surface
     private val accent=TvStyle.accent; private val white=TvStyle.text; private val muted=TvStyle.muted
     private val main=Handler(Looper.getMainLooper())
-    private val io=Executors.newFixedThreadPool(16)
+    private val io=Executors.newFixedThreadPool(3)
     private val repository=ContentRepository()
     private val networkCleanup=Executors.newSingleThreadExecutor()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
@@ -85,7 +79,6 @@ class MainActivity: Activity() {
     private lateinit var tvTools: TvTools
     private lateinit var updater: AppUpdater
     private lateinit var mediaSession: TvMediaSession
-    private lateinit var downloads: DownloadStore
     private val sleepTimer=SleepTimer { android.os.SystemClock.elapsedRealtime() }
     private var sleepStopped=false
     private var playerView: PlayerView?=null
@@ -160,13 +153,6 @@ class MainActivity: Activity() {
     private var transportPlay: TextView?=null
     private var sleepButton: TextView?=null
     private var speedDialog: AlertDialog?=null
-    private var downloadDialog: AlertDialog?=null
-    private enum class DownloadPhase { QUEUED, RUNNING, DONE, FAILED, CANCELLED }
-    private data class DownloadTask(val series: Series,val episodeId: String,val episodeIndex: Int,val totalEpisodes: Int,@Volatile var phase: DownloadPhase,@Volatile var bytes: Long=0,@Volatile var total: Long=0,@Volatile var message: String="")
-    private val downloadLimit=Semaphore(5)
-    private val downloadTasks=ConcurrentHashMap<String,DownloadTask>()
-    private val downloadStatusViews=mutableMapOf<String,TextView>()
-    private var downloadUiPending=false
     private var pendingSeek: Long?=null
     private var playError=false
     private var lastSaved=0L
@@ -213,7 +199,7 @@ class MainActivity: Activity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); downloads=DownloadStore(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
+        library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
         connectivity=getSystemService(ConnectivityManager::class.java)
         runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
@@ -322,17 +308,13 @@ class MainActivity: Activity() {
         collection=kind; page=1; catalogFocus=""; showCatalog()
     }
     private fun inlineHomeFilters()=tab==0 && resources.configuration.fontScale<=1.2f && widthDp()>=900
-    private fun localCatalog()=tab==3 || tab==4 || tab==5 || collection!=null
+    private fun localCatalog()=tab==3 || tab==4 || collection!=null
     private fun localItems(): List<Series> = when(collection) {
         "hot" -> collectionReturn?.items.orEmpty().filterNot { it.id in library.hidden() }
         "later" -> library.later()
         "updates" -> library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
-        else -> when(tab) {
-            3 -> library.favorites()
-            5 -> downloads.series()
-            else -> library.history().map { it.series }
-        }
+        else -> if(tab==3) library.favorites() else library.history().map { it.series }
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
@@ -348,7 +330,7 @@ class MainActivity: Activity() {
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_icon) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
         brand.addView(text("红果",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
         top.addView(brand,lp(dp(120),dp(44)))
-        listOf("首页","搜索","排行榜","收藏","最近观看","我的下载","设置").forEachIndexed { index,label ->
+        listOf("首页","搜索","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
             val item=addButton(top,label,index==tab) { switchTab(index) }
             fun paint(focused: Boolean) {
                 item.setTextColor(if(focused) bg else if(index==tab) accent else muted)
@@ -359,7 +341,7 @@ class MainActivity: Activity() {
         }
         container.addView(top)
         container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
-        if(tab==6) {
+        if(tab==5) {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
         }
@@ -403,7 +385,7 @@ class MainActivity: Activity() {
             nav.forEach { it.nextFocusDownId=rankRefresh!!.id }
         } else if(tab>2) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
-            heading.addView(text(when(tab) { 3 -> "我的收藏"; 5 -> "我的下载"; else -> "接着上次看" },25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            heading.addView(text(if(tab==3) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
             if(tab==3) {
                 favoriteCheck=addButton(heading,"检查更新") { favoriteMonitor.check(force=true) }.apply { nextFocusUpId=nav[tab].id }
             }
@@ -418,9 +400,6 @@ class MainActivity: Activity() {
             container.addView(heading)
             if(tab==3) {
                 favoriteStatus=text(favoriteMonitor.status,13f,muted).apply { setPadding(0,0,0,dp(6)) }; container.addView(favoriteStatus)
-            }
-            if(tab==5) {
-                container.addView(text("优先播放本地视频；没有下载的集数会继续在线播放。",13f,muted).apply { setPadding(0,0,0,dp(6)) })
             }
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
@@ -467,7 +446,6 @@ class MainActivity: Activity() {
     private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false) {
         if(tab==0 && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
         resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
-        if(tab==5 && collection==null) { renderDownloads(body,focusNav); return }
         if(collection!=null) {
             val heading=row()
             collectionBack=addButton(heading,"‹ 返回首页") { leaveCollection(); showCatalog() }.apply {
@@ -485,7 +463,7 @@ class MainActivity: Activity() {
         var restoringScroll=true
         val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
         if(displayed.isEmpty()) {
-            message(list,if(loading) "正在加载推荐…" else when(tab) { 1 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 3 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 4 -> "播放过的剧集会自动保存在这里"; 5 -> "下载完成的视频会出现在这里"; else -> "本页没有更多内容" })
+            message(list,if(loading) "正在加载推荐…" else when(tab) { 1 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 3 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 4 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
             if((tab<=2 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
             if((tab<=2 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
             if(resumeCards.isNotEmpty()) {
@@ -510,9 +488,9 @@ class MainActivity: Activity() {
                 }
                 card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
                 val progress=if(tab==4 || collection=="resume") library.progress(item.id) else null
-                val badge=text(if(tab==3) library.favoriteLabel(item.id) else if(tab==2) position?.heat?.ifBlank { "热度暂无" } ?: "热度暂无" else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第 ${progress.episodeIndex+1} 集 · ${formatTime(progress.position)}" else item.badge,12f,if(tab==2 || tab==3 || tab==5) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
+                val badge=text(if(tab==3) library.favoriteLabel(item.id) else if(tab==2) position?.heat?.ifBlank { "热度暂无" } ?: "热度暂无" else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第 ${progress.episodeIndex+1} 集 · ${formatTime(progress.position)}" else item.badge,12f,if(tab==2 || tab==3) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
                 card.addView(badge,lp(-1,-2)); if(tab==3) favoriteBadges[item.id]=badge
-                card.setOnClickListener { catalogFocus=item.id; if(tab==5) showDownloadedSeries(item) else openDetail(item,tab==4 || collection=="resume" || collection=="updates") }
+                card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==4 || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,selectionStatus(item)); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
@@ -764,151 +742,6 @@ class MainActivity: Activity() {
             }
         })
     }
-    private fun renderDownloads(body: LinearLayout,focusNav: Boolean) {
-        downloadStatusViews.clear()
-        val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false; clipToPadding=false }
-        val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
-        val active=downloadTasks.values.filter { it.phase!=DownloadPhase.DONE && it.phase!=DownloadPhase.CANCELLED }.groupBy { it.series.id }
-        val completed=downloads.summaries()
-        if(active.isEmpty() && completed.isEmpty()) {
-            message(list,"下载完成的视频会出现在这里")
-            if(focusNav) nav[tab].requestFocus() else nav[tab].requestFocus()
-            return
-        }
-        if(active.isNotEmpty()) {
-            list.addView(text("下载中",18f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(8),0,dp(8)) })
-            active.values.sortedBy { rows -> rows.minOf { it.episodeIndex } }.forEach { rows ->
-                val task=rows.first()
-                val line=row().apply { gravity=Gravity.CENTER_VERTICAL; setPadding(dp(8),dp(8),dp(8),dp(8)); background=rounded(surface) }
-                val title=column()
-                title.addView(text(task.series.title,17f).apply { setTypeface(null,Typeface.BOLD); maxLines=1; ellipsize=TextUtils.TruncateAt.END })
-                val status=text(downloadStatusText(task.series.id),13f,accent).apply { setPadding(0,dp(5),0,0); maxLines=1; ellipsize=TextUtils.TruncateAt.END }
-                title.addView(status); downloadStatusViews[task.series.id]=status
-                line.addView(title,lp(0,-2).apply { weight=1f })
-                lateinit var remove: TextView
-                remove=button("删除") { deleteDownloadedSeries(task.series,remove) }
-                line.addView(remove,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(44)).apply { leftMargin=dp(12) })
-                list.addView(line,lp(-1,-2).apply { bottomMargin=dp(10) })
-            }
-        }
-        if(completed.isNotEmpty()) {
-            list.addView(text("已下载",18f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(if(active.isEmpty()) 8 else 12),0,dp(8)) })
-            completed.forEach { summary ->
-                val line=row().apply { gravity=Gravity.CENTER_VERTICAL; setPadding(dp(8),dp(8),dp(8),dp(8)); background=rounded(surface); isFocusable=true; focusStyle(this) }
-                val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER }
-                line.addView(image,lp(dp(72),dp(102)).apply { rightMargin=dp(14) }); loadCover(image,summary.series.cover)
-                val info=column()
-                info.addView(text(summary.series.title,17f).apply { setTypeface(null,Typeface.BOLD); maxLines=1; ellipsize=TextUtils.TruncateAt.END })
-                val total=if(summary.totalEpisodes>0) "${summary.episodes}/${summary.totalEpisodes}" else summary.episodes.toString()
-                info.addView(text("已下载 $total 集 · ${DownloadStore.formatSize(summary.totalSize)}",13f,muted).apply { setPadding(0,dp(6),0,0) })
-                val status=text(downloadStatusText(summary.series.id),13f,accent).apply { setPadding(0,dp(5),0,0); maxLines=1; ellipsize=TextUtils.TruncateAt.END }
-                if(status.text.isNotBlank()) { info.addView(status); downloadStatusViews[summary.series.id]=status }
-                line.addView(info,lp(0,-2).apply { weight=1f })
-                val open=button("管理") { showDownloadedSeries(summary.series) }
-                line.addView(open,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(44)).apply { leftMargin=dp(12) })
-                lateinit var remove: TextView
-                remove=button("删除") { deleteDownloadedSeries(summary.series,remove) }
-                line.addView(remove,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(44)).apply { leftMargin=dp(8) })
-                line.setOnClickListener { showDownloadedSeries(summary.series) }
-                list.addView(line,lp(-1,-2).apply { bottomMargin=dp(12) })
-            }
-        }
-        nav.forEach { it.nextFocusDownId=list.getChildAt(0)?.id ?: nav[tab].id }
-        if(focusNav) nav[tab].requestFocus() else (list.findFocus() ?: nav[tab]).requestFocus()
-    }
-    private fun downloadStatusText(seriesId: String): String {
-        val allTasks=downloadTasks.values.filter { it.series.id==seriesId }
-        val tasks=allTasks.filter { it.phase!=DownloadPhase.DONE }
-        val done=downloads.episodes(seriesId).size
-        if(tasks.isEmpty()) {
-            val total=allTasks.maxOfOrNull { it.totalEpisodes } ?: 0
-            return if(total>0 && allTasks.isNotEmpty()) "已完成 · 已下载 $done/$total 集 · ${DownloadStore.formatSize(downloads.episodes(seriesId).sumOf { it.size })}" else ""
-        }
-        val total=tasks.maxOfOrNull { it.totalEpisodes }?.takeIf { it>0 } ?: maxOf(done+tasks.size,done)
-        val running=tasks.count { it.phase==DownloadPhase.RUNNING }
-        val queued=tasks.count { it.phase==DownloadPhase.QUEUED }
-        val failed=tasks.count { it.phase==DownloadPhase.FAILED }
-        val progress=tasks.filter { it.phase==DownloadPhase.RUNNING && it.total>0 }.sumOf { it.bytes } to tasks.filter { it.phase==DownloadPhase.RUNNING && it.total>0 }.sumOf { it.total }
-        val detail=when {
-            progress.second>0 -> " · ${DownloadStore.formatSize(progress.first)}/${DownloadStore.formatSize(progress.second)}"
-            running>0 -> " · $running 个进行中"
-            else -> ""
-        }
-        return if(failed>0) "正在下载 $done/$total 集 · $failed 个失败 · $queued 个等待"
-        else "正在下载 $done/$total 集$detail · $queued 个等待"
-    }
-    private fun refreshDownloadViews() {
-        if(screen!="catalog" || tab!=5) return
-        downloadStatusViews.forEach { (seriesId,view) -> view.text=downloadStatusText(seriesId) }
-    }
-    private fun scheduleDownloadUi() {
-        if(downloadUiPending) return
-        downloadUiPending=true
-        main.postDelayed({
-            downloadUiPending=false
-            refreshDownloadViews()
-        },500)
-    }
-    private fun showDownloadedSeries(series: Series) {
-        invalidatePage(); releaseCatalogViews(); screen="detail"; detail=null; directPlayback=false
-        val rows=downloads.episodes(series.id)
-        if(rows.isEmpty()) { showCatalog(); return }
-        val body=base("我的下载")
-        val heading=row().apply { setPadding(0,dp(12),0,dp(10)) }
-        addButton(heading,"‹ 返回下载") { showCatalog() }
-        heading.addView(text(series.title,25f).apply { setTypeface(null,Typeface.BOLD); maxLines=1; ellipsize=TextUtils.TruncateAt.END },lp(0,-2).apply { weight=1f })
-        lateinit var deleteAll: TextView
-        deleteAll=addButton(heading,"删除整部") { deleteDownloadedSeries(series,deleteAll) }
-        body.addView(heading)
-        body.addView(text("已下载 ${rows.size} 集 · ${DownloadStore.formatSize(rows.sumOf { it.size })}，点击即可离线播放；长按单集可删除。",14f,muted).apply { setPadding(0,0,0,dp(12)) })
-        val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }; val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
-        rows.chunked(8).forEach { chunk ->
-            val line=row()
-            chunk.forEach { item ->
-                val episodeButton=button("第 ${item.episodeIndex+1} 集",false) { playDownloaded(item) }.apply {
-                    setOnLongClickListener { deleteDownloadedEpisode(item,this); true }
-                }
-                line.addView(episodeButton,lp(0,dp(46)).apply { weight=1f; rightMargin=dp(7) })
-            }
-            repeat(8-chunk.size) { line.addView(Space(this),lp(0,dp(46)).apply { weight=1f; rightMargin=dp(7) }) }
-            list.addView(line,lp(-1,dp(52)))
-        }
-    }
-    private fun deleteDownloadedSeries(series: Series,anchor: View?) {
-        val saved=downloads.episodes(series.id)
-        val active=downloadTasks.values.count { it.series.id==series.id && it.phase!=DownloadPhase.DONE && it.phase!=DownloadPhase.CANCELLED }
-        if(saved.isEmpty() && active==0) { Toast.makeText(this,"没有可删除的下载内容",Toast.LENGTH_SHORT).show(); return }
-        val size=DownloadStore.formatSize(saved.sumOf { it.size })
-        val message=buildString {
-            append("删除《${series.title}》已下载的 ${saved.size} 集")
-            if(saved.isNotEmpty()) append(" · $size")
-            append("？")
-            if(active>0) append("\n\n同时取消 $active 个正在等待或下载中的任务。")
-        }
-        tvTools.confirm("删除下载",message,anchor) {
-            cancelDownloadTasks(series.id)
-            val removed=downloads.deleteSeries(series.id)
-            Toast.makeText(this,"已删除 $removed 集",Toast.LENGTH_SHORT).show()
-            if(screen=="detail") showCatalog() else if(screen=="catalog" && tab==5) showCatalog()
-        }
-    }
-    private fun deleteDownloadedEpisode(item: DownloadedEpisode,anchor: View?) {
-        tvTools.confirm("删除单集","删除《${item.series.title}》第 ${item.episodeIndex+1} 集？",anchor) {
-            val removed=downloads.deleteEpisode(item.series.id,item.episodeId)
-            Toast.makeText(this,if(removed) "已删除第 ${item.episodeIndex+1} 集" else "这一集已经不存在",Toast.LENGTH_SHORT).show()
-            if(downloads.episodes(item.series.id).isEmpty()) showCatalog() else showDownloadedSeries(item.series)
-        }
-    }
-    private fun cancelDownloadTasks(seriesId: String) {
-        downloadTasks.values.filter { it.series.id==seriesId }.forEach { it.phase=DownloadPhase.CANCELLED }
-        downloadTasks.keys.filter { key -> downloadTasks[key]?.series?.id==seriesId }.forEach { downloadTasks.remove(it) }
-    }
-    private fun playDownloaded(item: DownloadedEpisode) {
-        val rows=downloads.episodes(item.series.id)
-        detail=Detail(item.series,rows.map { it.episodeId })
-        val index=rows.indexOfFirst { it.episodeId==item.episodeId }.coerceAtLeast(0)
-        playEpisode(index,0,autoplay=true)
-    }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
         pendingDetail=series; detailAutoplay=autoplay
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
@@ -980,14 +813,12 @@ class MainActivity: Activity() {
         val delayInitialBuffering=autoNextTransition && position==0L && autoplay && !recovering
         library.setWatched(data.series.id,false)
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        val requestedId=data.episodes[selectedIndex]
-        val localDownload=downloads.find(data.series.id,requestedId)?.takeIf { it.file.exists() && it.file.length()>0 }
-        val prefetched=if(localDownload==null && position==0L && !recovering) preparedNext.take("$requestedId:${library.maxQuality}") else null
+        val prefetched=if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
         val claimedHttp=if(prefetched!=null) prefetchHttp.also { prefetchHttp=null } else null
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
             cancelRecovery(); cancelPrefetch(); tvTools.close()
-            episodePanel?.dismiss(); episodePanel=null; speedDialog?.dismiss(); speedDialog=null; downloadDialog?.dismiss(); downloadDialog=null
+            episodePanel?.dismiss(); episodePanel=null; speedDialog?.dismiss(); speedDialog=null
             playerListener?.let { player?.removeListener(it) }; playerListener=null
             player?.stop(); player?.clearMediaItems()
             video?.close(); video=null; closeTransport(playbackHttp); playbackHttp=null
@@ -1009,8 +840,6 @@ class MainActivity: Activity() {
             val view=PlayerView(this).apply {
                 useController=false; resizeMode=frameResizeMode(); isFocusable=false
                 setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
-                setOnClickListener { if(screen=="player" && !playError) togglePlayback() }
-                setOnLongClickListener { if(screen=="player" && !playError) { showPanel(); true } else false }
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
@@ -1026,11 +855,9 @@ class MainActivity: Activity() {
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
-        val maxQuality=library.maxQuality; val ticket=generation
-        work({ localDownload ?: (prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).prepare()) }, { sourceData ->
-            val local=sourceData as? DownloadedEpisode
-            val remote=sourceData as? RemoteVideo
-            video=remote; quality=local?.let { "${it.quality} · 本地" } ?: remote!!.info.quality
+        val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
+        work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).prepare() }, { remote ->
+            video=remote; quality=remote.info.quality
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
                 val renderers=androidx.media3.exoplayer.DefaultRenderersFactory(this).setEnableDecoderFallback(true)
@@ -1075,11 +902,7 @@ class MainActivity: Activity() {
                 override fun onPlayerError(error: PlaybackException) { if(active()) playerFailure(error) }
             }
             playerListener=listener; p.addListener(listener)
-            val source=if(local!=null) {
-                ProgressiveMediaSource.Factory(DefaultDataSource.Factory(this)).createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri(Uri.fromFile(local.file)).setMimeType(MimeTypes.VIDEO_MP4).build())
-            } else {
-                ProgressiveMediaSource.Factory { VideoDataSource(remote!!) }.createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
-            }
+            val source=ProgressiveMediaSource.Factory { VideoDataSource(remote) }.createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
             p.setMediaSource(source); p.seekTo(position.coerceAtLeast(0)); p.prepare(); p.playWhenReady=foreground && requestedAutoplay && !pausedForLifecycle && episodePanel==null
         }, { problem -> playerFailure(problem) })
     }
@@ -1262,203 +1085,19 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(currentSeriesSpeed())}","下载","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(currentSeriesSpeed())}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSeriesSpeedPicker(more)
-                        1 -> showDownloadPicker(more)
-                        2 -> showQualityPicker(more,true)
-                        3 -> showFramePicker(more,true)
-                        4 -> showSleepPicker(more)
-                        5 -> { seekTo(0); hidePanel() }
+                        1 -> showQualityPicker(more,true)
+                        2 -> showFramePicker(more,true)
+                        3 -> showSleepPicker(more)
+                        4 -> { seekTo(0); hidePanel() }
                     }
                 }
             })
         }.apply { tag="playback-settings" }
         play.requestFocus()
-    }
-    private fun showDownloadPicker(anchor: View, refreshIfIncomplete: Boolean=true) {
-        if(downloadDialog!=null) return
-        val data=detail ?: return
-        val expected=expectedEpisodeCount(data.series)
-        if(refreshIfIncomplete && expected>data.episodes.size) {
-            Toast.makeText(this,"正在刷新完整剧集列表…",Toast.LENGTH_SHORT).show()
-            work({ repository.detail(data.series.id) }, { refreshed ->
-                detail=refreshed
-                showDownloadPicker(anchor,false)
-            }, {
-                showDownloadPicker(anchor,false)
-            })
-            return
-        }
-        val selected=BooleanArray(data.episodes.size) { it==episodeIndex }
-        val columns=4
-        val rowsPerPage=3
-        val pageSize=columns*rowsPerPage
-        val lastPage=data.episodes.lastIndex/pageSize
-        var page=if(data.episodes.size-episodeIndex<=pageSize*2) lastPage else episodeIndex/pageSize
-        val boxes=mutableListOf<CheckBox>()
-        lateinit var list: LinearLayout
-        lateinit var pageLabel: TextView
-        lateinit var previous: TextView
-        lateinit var next: TextView
-        val content=column().apply { setPadding(0,0,0,dp(6)) }
-        val top=row().apply { setPadding(0,0,0,dp(10)) }
-        top.addView(text("选择集数（共 ${data.episodes.size} 集）",17f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-        val all=button("全选") {
-            selected.indices.forEach { selected[it]=true }
-            boxes.forEach { it.isChecked=true }
-        }.apply { minWidth=dp(96) }
-        top.addView(all,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)))
-        content.addView(top)
-        val pager=row().apply { setPadding(0,dp(8),0,0) }
-        previous=button("上一页") {
-            if(page>0) { page--; renderDownloadPage(list,boxes,selected,page,pageSize,columns,pageLabel,previous,next) }
-        }.apply { minWidth=dp(96) }
-        pager.addView(previous,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)).apply { rightMargin=dp(10) })
-        pageLabel=text("",15f,muted).apply { gravity=Gravity.CENTER }
-        pager.addView(pageLabel,lp(0,dp(42)).apply { weight=1f })
-        next=button("下一页") {
-            if(page<lastPage) { page++; renderDownloadPage(list,boxes,selected,page,pageSize,columns,pageLabel,previous,next) }
-        }.apply { minWidth=dp(96) }
-        pager.addView(next,lp(LinearLayout.LayoutParams.WRAP_CONTENT,dp(42)))
-        content.addView(pager)
-        list=column()
-        content.addView(list,lp(-1,dp(155)))
-        renderDownloadPage(list,boxes,selected,page,pageSize,columns,pageLabel,previous,next)
-        val dialog=AlertDialog.Builder(this).setTitle("${data.series.title} · 下载")
-            .setView(content)
-            .setNegativeButton("取消",null)
-            .setPositiveButton("开始下载",null)
-            .create()
-        downloadDialog=dialog
-        dialog.setOnDismissListener { downloadDialog=null; if(anchor.isAttachedToWindow) anchor.requestFocus() }
-        dialog.show()
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val episodes=selected.indices.filter { selected[it] }
-            if(episodes.isEmpty()) Toast.makeText(this,"请选择要下载的集数",Toast.LENGTH_SHORT).show()
-            else { dialog.dismiss(); startDownloads(data,episodes) }
-        }
-    }
-    private fun renderDownloadPage(list: LinearLayout, boxes: MutableList<CheckBox>, selected: BooleanArray, page: Int, pageSize: Int, columns: Int, pageLabel: TextView, previous: TextView, next: TextView) {
-        boxes.clear(); list.removeAllViews()
-        val from=page*pageSize
-        val to=minOf(from+pageSize,selected.size)
-        (from until to).toList().chunked(columns).forEach { chunk ->
-            val line=row()
-            chunk.forEach { index ->
-                val box=CheckBox(this).apply {
-                    text="第 ${index+1} 集"; textSize=15f; setTextColor(white); isChecked=selected[index]
-                    maxLines=1; ellipsize=TextUtils.TruncateAt.END; minHeight=dp(48); gravity=Gravity.CENTER_VERTICAL
-                    setPadding(0,0,dp(8),0)
-                    setOnCheckedChangeListener { _,checked -> selected[index]=checked }
-                }
-                boxes+=box
-                line.addView(box,lp(0,dp(50)).apply { weight=1f; rightMargin=dp(10) })
-            }
-            repeat(columns-chunk.size) { line.addView(Space(this),lp(0,dp(50)).apply { weight=1f; rightMargin=dp(10) }) }
-            list.addView(line)
-        }
-        repeat((pageSize-(to-from)+columns-1)/columns) { list.addView(Space(this),lp(-1,dp(50))) }
-        pageLabel.text="第 ${from+1}—${to} 集"
-        val lastPage=selected.lastIndex/pageSize
-        previous.isEnabled=page>0; previous.isFocusable=page>0; previous.alpha=if(page>0) 1f else .4f
-        next.isEnabled=page<lastPage; next.isFocusable=page<lastPage; next.alpha=if(page<lastPage) 1f else .4f
-    }
-    private fun expectedEpisodeCount(series: Series): Int =
-        Regex("""全\s*(\d+)\s*集""").find(series.badge)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-    private fun startDownloads(data: Detail, episodes: List<Int>) {
-        val totalEpisodes=data.episodes.size
-        val pending=mutableListOf<Int>()
-        episodes.forEach { index ->
-            val episodeId=data.episodes[index]
-            if(downloads.find(data.series.id,episodeId)?.file?.exists()==true) return@forEach
-            val key=downloadKey(data.series.id,episodeId)
-            if(downloadTasks.putIfAbsent(key,DownloadTask(data.series,episodeId,index,totalEpisodes,DownloadPhase.QUEUED))==null) pending+=index
-        }
-        if(pending.isEmpty()) {
-            Toast.makeText(this,"《${data.series.title}》所选剧集已下载完成",Toast.LENGTH_SHORT).show()
-            return
-        }
-        val finished=AtomicInteger(0)
-        val failed=AtomicInteger(0)
-        val cancelled=AtomicInteger(0)
-        fun finishOne(task: DownloadTask, success: Boolean) {
-            if(task.phase==DownloadPhase.CANCELLED) cancelled.incrementAndGet()
-            else if(!success) failed.incrementAndGet()
-            if(finished.incrementAndGet()!=pending.size) return
-            main.post {
-                scheduleDownloadUi()
-                val failedCount=failed.get()
-                val cancelledCount=cancelled.get()
-                val title=data.series.title
-                val message=when {
-                    failedCount==0 && cancelledCount==0 -> "《$title》已完成下载"
-                    cancelledCount>0 && failedCount==0 -> "《$title》下载已取消 $cancelledCount 集"
-                    cancelledCount>0 -> "《$title》下载结束，失败 $failedCount 集，取消 $cancelledCount 集"
-                    else -> "《$title》下载结束，失败 $failedCount 集"
-                }
-                Toast.makeText(this,message,Toast.LENGTH_LONG).show()
-            }
-        }
-        if(screen=="catalog" && tab==5) showCatalog()
-        pending.forEach { index ->
-            val episodeId=data.episodes[index]
-            val key=downloadKey(data.series.id,episodeId)
-            val task=downloadTasks[key] ?: return@forEach
-            io.submit {
-                downloadLimit.acquire()
-                try {
-                    if(task.phase==DownloadPhase.CANCELLED) { finishOne(task,false); return@submit }
-                    task.phase=DownloadPhase.RUNNING; task.message=""; main.post { scheduleDownloadUi() }
-                    runCatching { downloadEpisode(data,index,task) }
-                        .onSuccess {
-                            if(task.phase==DownloadPhase.CANCELLED) { finishOne(task,false); return@onSuccess }
-                            task.phase=DownloadPhase.DONE; task.bytes=task.total.coerceAtLeast(task.bytes)
-                            main.post { scheduleDownloadUi() }
-                            finishOne(task,true)
-                        }
-                        .onFailure { problem ->
-                            if(task.phase!=DownloadPhase.CANCELLED) {
-                                task.phase=DownloadPhase.FAILED; task.message=problem.message ?: "未知错误"
-                            }
-                            main.post { scheduleDownloadUi() }
-                            finishOne(task,false)
-                        }
-                } finally {
-                    downloadLimit.release()
-                }
-            }
-        }
-    }
-    private fun downloadKey(seriesId: String, episodeId: String) = "$seriesId:$episodeId"
-    private fun downloadEpisode(data: Detail, index: Int, task: DownloadTask?=null) {
-        val episodeId=data.episodes[index]
-        downloads.find(data.series.id,episodeId)?.takeIf { it.file.exists() && it.file.length()>0 }?.let { return }
-        val target=downloads.targetFile(data.series.id,episodeId)
-        val temp=java.io.File(target.parentFile,"${target.name}.download")
-        val remote=RemoteVideo(repository.http,repository.stream(episodeId,Int.MAX_VALUE)).prepare()
-        task?.total=remote.total
-        try {
-            FileOutputStream(temp).use { out ->
-                var position=0L
-                while(position<remote.total) {
-                    check(task?.phase!=DownloadPhase.CANCELLED) { "下载已取消" }
-                    val bytes=remote.read(position,minOf(1024*1024L,remote.total-position).toInt())
-                    if(bytes.isEmpty()) break
-                    out.write(bytes); position+=bytes.size
-                    task?.bytes=position
-                    main.post { scheduleDownloadUi() }
-                }
-            }
-            check(task?.phase!=DownloadPhase.CANCELLED) { "下载已取消" }
-            if(target.exists()) target.delete()
-            check(temp.renameTo(target)) { "保存文件失败" }
-            downloads.put(DownloadedEpisode(data.series,episodeId,index,target,remote.info.quality,System.currentTimeMillis(),target.length()))
-        } finally {
-            remote.close()
-            if(temp.exists()) temp.delete()
-        }
     }
     private fun showSpeedPicker(anchor: TextView,inPlayer: Boolean=true) {
         if(speedDialog!=null) return
@@ -1555,7 +1194,7 @@ class MainActivity: Activity() {
         cancelDelayedBuffering()
         val wasForeground=foreground; foreground=false
         val oldPanel=episodePanel; episodePanel=null; oldPanel?.dismiss(); foreground=wasForeground
-        speedDialog?.dismiss(); speedDialog=null; downloadDialog?.dismiss(); downloadDialog=null
+        speedDialog?.dismiss(); speedDialog=null
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         playerListener?.let { player?.removeListener(it) }; playerListener=null
         video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
