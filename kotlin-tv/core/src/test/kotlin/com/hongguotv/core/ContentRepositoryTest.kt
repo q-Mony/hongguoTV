@@ -12,12 +12,87 @@ import org.junit.Test
 import java.io.IOException
 
 class ContentRepositoryTest {
-    private fun streamRepository(vararg variants: Triple<Int,String,String>) = repository { request ->
-        if(request.url.host=="example.com") {
+    // Modern shape: the batch route returns the player model inline, with plain main_url per variant.
+    private fun streamRepository(vararg variants: Triple<Int,String,String>, status: Int = 10, inline: Boolean = true) = repository { request ->
+        if(inline) {
+            val rows=JSONArray()
+            variants.forEach { (height,codec,url) ->
+                rows.put(JSONObject().put("main_url",url)
+                    .put("video_meta",JSONObject().put("vheight",height).put("codec_type",codec).put("definition","${height}p")))
+            }
+            JSONObject().put("data",JSONObject().put("123",JSONObject().put("video_model",
+                JSONObject().put("status",status).put("video_list",rows).toString()))).toString()
+        } else if(request.url.host=="example.com") {
+            // Legacy shape: fallback_api must be fetched, and video_list is keyed by video_N.
             val rows=JSONObject()
             variants.forEachIndexed { index,(height,codec,url) -> rows.put("video_$index",JSONObject().put("vheight",height).put("codec_type",codec).put("main_url",url)) }
             JSONObject().put("video_info",JSONObject().put("data",JSONObject().put("video_list",rows))).toString()
-        } else """{"data":{"123":{"video_model":{"fallback_api":"https://example.com/stream"}}}}"""
+        } else JSONObject().put("data",JSONObject().put("123",JSONObject().put("video_model",
+            JSONObject().put("status",status).put("fallback_api",JSONObject().put("fallback_api","https://example.com/stream").toString()).toString()))).toString()
+    }
+
+    @Test fun inlinePlayerModelReadsVideoListWithoutASecondRequest() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            val rows=JSONArray().put(JSONObject().put("main_url","https://example.com/avc")
+                .put("video_meta",JSONObject().put("vheight",720).put("codec_type","h264").put("definition","720p")))
+            JSONObject().put("data",JSONObject().put("123",JSONObject().put("video_model",
+                JSONObject().put("status",10).put("video_list",rows).toString()))).toString()
+        }
+        val result=repo.stream("123",720)
+        assertEquals("https://example.com/avc",result.url)
+        assertEquals("720P",result.quality)
+        assertEquals(listOf("/novel/player/multi_video_model/preload/v1/"),paths)
+    }
+
+    @Test fun retiredBatchRouteIsRetriedWhenThePreloadRouteIsUnavailable() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            if(request.url.encodedPath.contains("preload")) """{"code":110001,"data":{}}"""
+            else {
+                val rows=JSONArray().put(JSONObject().put("main_url","https://example.com/single")
+                    .put("video_meta",JSONObject().put("vheight",480).put("codec_type","h264").put("definition","480p")))
+                JSONObject().put("data",JSONObject().put("video_model",
+                    JSONObject().put("status",10).put("video_list",rows).toString())).toString()
+            }
+        }
+        val result=repo.stream("123",720)
+        assertEquals("https://example.com/single",result.url)
+        assertEquals("480P",result.quality)
+        assertEquals(2,paths.size)
+    }
+
+    @Test fun legacyFallbackApiStillResolvesWhenInlineListIsAbsent() {
+        val repo=streamRepository(Triple(720,"h264","https://example.com/legacy-fallback"),inline=false)
+        assertEquals("https://example.com/legacy-fallback",repo.stream("123",720).url)
+    }
+
+    @Test fun nonReadyPlaybackStatusFallsBackToPublicRendition() {
+        val repo=streamRepository(Triple(720,"h264","https://example.com/avc"),status=4)
+        val result=repo.stream("123",720)
+        assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",result.url)
+        assertEquals("360P（公开版）",result.quality)
+    }
+
+    @Test fun unavailablePlayerApiFallsBackToPublicRendition() {
+        val repo=repository { """{"Code":110001,"Message":"未知异常"}""" }
+        val result=repo.stream("123",720)
+        assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",result.url)
+        assertEquals("360P（公开版）",result.quality)
+        assertNull(result.key)
+    }
+
+    @Test fun missingPublicRenditionReportsFailureInsteadOfADeadUrl() {
+        // Some episodes have no public copy; the probe must reject it rather than hand back a 404 URL.
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val missing=chain.request().url.encodedPath.startsWith("/video/public/")
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(if(missing) 404 else 200).message(if(missing) "Not Found" else "OK")
+                .body((if(missing) "" else """{"Code":110001,"Message":"未知异常"}""").toResponseBody()).build()
+        }.build())
+        assertThrows(IOException::class.java) { repo.stream("123",720) }
     }
 
     @Test fun incompatibleByteVc2DoesNotBecomeAudioOnlyPlayback() {
@@ -32,9 +107,12 @@ class ContentRepositoryTest {
         assertEquals("480P",repo.stream("123",720).quality)
     }
 
-    @Test fun entirelyIncompatibleSourceFailsBeforeStartingAudio() {
+    @Test fun entirelyIncompatibleSourceNeverBecomesAudioOnlyPlayback() {
         val repo=streamRepository(Triple(720,"ByteVC2","https://example.com/unsupported"),Triple(480,"bvc2","https://example.com/unsupported2"))
-        assertThrows(IOException::class.java) { repo.stream("123",720) }
+        // The incompatible variants must not be selected; playback drops to the public rendition instead.
+        val result=repo.stream("123",720)
+        assertFalse(result.url.contains("unsupported"))
+        assertEquals("360P（公开版）",result.quality)
     }
 
     @Test fun legacyMissingCodecLabelKeepsQualityLimit() {
@@ -255,5 +333,73 @@ class ContentRepositoryTest {
         }
         assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
         assertEquals(2,paths.size)
+    }
+
+    // Scheme B is the fallback: when scheme A's response carries no model, the request is retried
+    // with the minimal signer, which must still yield a playable variant.
+    @Test fun fallbackSignerIsUsedWhenThePrimarySchemeYieldsNoModel() {
+        val schemes=mutableListOf<String>()
+        val repo=repository { request ->
+            // Scheme A sends x-medusa-less full headers including x-ladon; scheme B does not.
+            schemes+=(if(request.header("x-ladon")!=null) "A" else "B")
+            if(request.header("x-ladon")!=null) ""
+            else {
+                val rows=JSONArray().put(JSONObject().put("main_url","https://example.com/fallback-scheme")
+                    .put("video_meta",JSONObject().put("vheight",1080).put("codec_type","bytevc1").put("definition","1080p")))
+                JSONObject().put("data",JSONObject().put("123",JSONObject().put("video_model",
+                    JSONObject().put("status",10).put("video_list",rows).toString()))).toString()
+            }
+        }
+        val result=repo.stream("123",1080)
+        assertEquals("https://example.com/fallback-scheme",result.url)
+        assertEquals("1080P",result.quality)
+        // Scheme A must be attempted first, on every route, before scheme B is tried at all.
+        assertTrue("scheme A must be tried first",schemes.first()=="A")
+        assertTrue("scheme B must actually be exercised",schemes.contains("B"))
+    }
+
+    // The happy path must not pay for the fallback: one route, one scheme.
+    @Test fun primarySchemeSucceedsWithoutTouchingTheFallback() {
+        val schemes=mutableListOf<String>()
+        val repo=repository { request ->
+            schemes+=(if(request.header("x-ladon")!=null) "A" else "B")
+            val rows=JSONArray().put(JSONObject().put("main_url","https://example.com/primary")
+                .put("video_meta",JSONObject().put("vheight",720).put("codec_type","bytevc1").put("definition","720p")))
+            JSONObject().put("data",JSONObject().put("123",JSONObject().put("video_model",
+                JSONObject().put("status",10).put("video_list",rows).toString()))).toString()
+        }
+        assertEquals("https://example.com/primary",repo.stream("123",720).url)
+        assertEquals(listOf("A"),schemes)
+    }
+
+    // A sustained outage must not churn device identities. The first total failure may rotate once
+    // (we cannot yet tell a ban from an outage), but every failure after that must leave the
+    // fingerprint alone until the interval elapses. That bound is the whole point of the guard.
+    @Test fun repeatedTotalFailureRotatesAtMostOnce() {
+        DeviceFingerprint.restore("1111111111111111111","2222222222222222222",0)
+        val repo=repository { "" }
+        val seen=mutableSetOf<Pair<String,String>>()
+        repeat(5) {
+            runCatching { repo.stream("123",1080) }
+            seen+=DeviceFingerprint.current()
+        }
+        assertTrue("an outage must not mint a new device per failure (saw ${seen.size})",seen.size<=2)
+        // Whatever it settled on must be a well-formed identity, not a degraded value.
+        val (deviceId,iid)=DeviceFingerprint.current()
+        assertTrue(deviceId.matches(Regex("[0-9]{19}")))
+        assertTrue(iid.matches(Regex("[0-9]{19}")))
+    }
+
+    @Test fun rejectionRotatesTheDeviceIdentityAtMostOncePerInterval() {
+        DeviceFingerprint.restore("1111111111111111111","2222222222222222222",0)
+        val first=DeviceFingerprint.rotateIfRejected(1_000_000L)
+        assertNotNull("a rejection with no recent rotation should rotate",first)
+        assertNotEquals("1111111111111111111" to "2222222222222222222",DeviceFingerprint.current())
+        // A second rejection inside the interval must be declined: this is what stops an outage
+        // from being mistaken for a ban.
+        assertNull(DeviceFingerprint.rotateIfRejected(1_000_000L+1000))
+        assertEquals(first,DeviceFingerprint.current())
+        // Past the interval it is allowed again.
+        assertNotNull(DeviceFingerprint.rotateIfRejected(1_000_000L+DeviceFingerprint.MIN_ROTATION_INTERVAL_MILLIS+1))
     }
 }

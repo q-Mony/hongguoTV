@@ -4,9 +4,37 @@ package com.hongguotv.core
 internal object VendorConstants {
     const val VIDEO_UA = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
     const val APP_UA = "com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)"
-    val device = linkedMapOf(
-        "iid" to "1905892595382586",
-        "device_id" to "1905892595378490",
+    // The install fingerprint has to belong to this installation. A device_id/iid pair hardcoded in a
+    // public client is shared by every user of that client and gets flagged upstream: requests signed
+    // with it come back as HTTP 200 with an empty body, which looks exactly like a real outage.
+    // So it is generated per installation and then kept. It must NOT be regenerated per launch or per
+    // request: a client that presents a brand-new device on every start looks like a device farm and
+    // gets silently throttled the same way. Rotation happens only when upstream has actually rejected
+    // the current identity -- see DeviceFingerprint.rotate.
+    private fun randomDeviceId(): String {
+        val random=java.security.SecureRandom()
+        val value=java.math.BigInteger(63,random).mod(java.math.BigInteger("8000000000000000000")).toLong()
+        return (1000000000000000000L+value).toString()
+    }
+    private val valid = Regex("[0-9]{19}")
+    /** A fresh, well-formed identity pair. */
+    fun newIdentity(): Pair<String,String> = randomDeviceId() to randomDeviceId()
+    private var storedId: String? = null
+    private var storedInstall: String? = null
+    /** Adopt a persisted identity. Null or malformed values are ignored, never propagated. */
+    fun adopt(deviceId: String?, installId: String?) {
+        if(deviceId!=null && valid.matches(deviceId)) storedId=deviceId
+        if(installId!=null && valid.matches(installId)) storedInstall=installId
+    }
+    /** Install a newly generated identity. Values are trusted here, not parsed from storage. */
+    fun replace(deviceId: String, installId: String) { storedId=deviceId; storedInstall=installId }
+    private val fallbackInstall by lazy { randomDeviceId() }
+    private val fallbackDevice by lazy { randomDeviceId() }
+    private val installId get() = storedInstall ?: fallbackInstall
+    private val deviceId get() = storedId ?: fallbackDevice
+    val device: Map<String,String> get() = linkedMapOf(
+        "iid" to installId,
+        "device_id" to deviceId,
         "ac" to "wifi",
         "channel" to "update_64",
         "aid" to "8662",
