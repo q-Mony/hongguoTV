@@ -42,7 +42,7 @@ Android 8.0+，Kotlin / Media3，单 APK，无需部署服务。非官方、自�
 ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:assembleDebug
 ```
 
-正式构建使用 `scripts/build-kotlin.sh`；签名配置见 [原生构建说明](kotlin-tv/README.md)。自动版本号为 10000 + workflow run_number，versionName 为 0.9.0+run_number。Release 的 update.json 记录确切版本和源码提交，复现时传入 HONGGUOTV_VERSION_CODE 与 HONGGUOTV_VERSION_NAME。
+正式构建使用 `scripts/build-kotlin.sh`；签名配置见 [原生构建说明](kotlin-tv/README.md)。自动版本号为 10000 + workflow run_number，versionName 为 0.9.1+run_number。Release 的 update.json 记录确切版本和源码提交，复现时传入 HONGGUOTV_VERSION_CODE 与 HONGGUOTV_VERSION_NAME。
 
 Android 8 实体电视的解码、音频、遥控器和系统安装入口仍需实机确认。
 ''')
