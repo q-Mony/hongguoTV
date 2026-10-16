@@ -53,6 +53,19 @@ class Library(context: Context) {
                 retired.forEach { check(it.awaitClosed(30, TimeUnit.SECONDS)) { "上次观看记录仍在保存，请稍后重试" } }
                 synchronized(retiredWrites) { retiredWrites.removeAll(retired.toSet()) }
                 val values = prefs.all
+                // Restore the per-install signing identity before anything can sign a request, then
+                // write back whatever is in use so the next launch presents the same device.
+                // The rotatedAt stamp is restored too, so an outage cannot churn identities.
+                DeviceFingerprint.restore(values["deviceId"] as? String, values["installId"] as? String,
+                    (values["deviceRotatedAt"] as? Number)?.toLong() ?: 0)
+                DeviceFingerprint.persist = { deviceId, installId ->
+                    prefs.edit().putString("deviceId", deviceId).putString("installId", installId)
+                        .putLong("deviceRotatedAt", DeviceFingerprint.lastRotatedAt()).apply()
+                }
+                val (currentDevice, currentInstall) = DeviceFingerprint.current()
+                if (values["deviceId"] != currentDevice || values["installId"] != currentInstall) {
+                    prefs.edit().putString("deviceId", currentDevice).putString("installId", currentInstall).commit()
+                }
                 val loaded = LibraryDisk.decode(values)
                 val loadedSeriesSpeeds = decodeSeriesSpeeds(values["seriesPlaybackSpeeds"])
                 val now = System.currentTimeMillis()
