@@ -11,6 +11,18 @@
   - `feature/mobile-downloads-touch` —— 手机下载 + 触摸播放控制
   - `fix/play-api-recovery` —— 1080P 恢复的独立提交线
 
+## 功能归属（用户指定，2026-10-16 起）
+
+- **Download（手机下载）功能由 `feature/mobile-downloads-touch` 专属承载**：
+  其他功能分支不需要、也不得引入下载代码（`DownloadStore.kt`、「我的下载」
+  入口、下载选集等）；下载相关的改动只提交到该分支。
+- 现状事实：`my-release` 与本地 `main` 因历史合并**已包含**下载功能
+  （正式包 0.9.1 带「我的下载」）；若要求主分支移除下载，另行处理，
+  不要顺手把下载代码扩散到 `feature/series-speed-menu` 或
+  `fix/play-api-recovery`。
+- 触摸播放控制（点击暂停/长按更多）随下载分支引入，同样只属于
+  `feature/mobile-downloads-touch`。
+
 ## 版本规则
 
 - 所有分支的默认版本统一为 **versionCode 10 / versionName 0.9.1**，
