@@ -82,11 +82,33 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return websiteSearch(keyword,page)
     }
     private fun websiteSearch(keyword: String, page: Int): CatalogPage {
-        val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
+        // Two independent website sources whose result sets only partially overlap (measured
+        // 2026-10: the SSR page is fixed at 10 rows and misses titles the suggestion API returns,
+        // and vice versa). Merge them so newly published dramas that fall off one list still
+        // surface from the other. The SSR page ignores ?page and re-serves page 1, so paging
+        // happens over the merged list instead of upstream.
+        val merged=LinkedHashMap<String,Series>()
+        val ssr=runCatching { websiteSsrSearch(keyword) }
+        ssr.getOrNull()?.forEach { merged.putIfAbsent(it.id,it) }
+        runCatching { websiteSuggestionSearch(keyword) }.getOrNull()?.forEach { merged.putIfAbsent(it.id,it) }
+        if(merged.isEmpty()) { ssr.exceptionOrNull()?.let { throw it }; return CatalogPage(emptyList(),false) }
+        val all=merged.values.toList()
+        val start=(page-1)*10
+        if(start>=all.size) return CatalogPage(emptyList(),false)
+        return CatalogPage(all.subList(start,minOf(start+10,all.size)),start+10<all.size)
+    }
+    private fun websiteSsrSearch(keyword: String): List<Series> {
+        val data=router("$site/search/${Signer.encode(keyword)}")
         val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
         val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
-        val items=valid(rows.objects().map(::card))
-        return CatalogPage(items,items.isNotEmpty() && page<100)
+        return valid(rows.objects().map(::card))
+    }
+    private fun websiteSuggestionSearch(keyword: String): List<Series> {
+        val url="$site/incent_resource/suggestion?app_id=8662&query=${Signer.encode(keyword)}&count=50"
+        val rows=JSONObject(text(url)).optJSONArray("suggest_list") ?: return emptyList()
+        // Only word_type short_play_name carries a playable series; the rest are actors or tags.
+        // video_data.series_id arrives as a JSON number; str() reads it losslessly as a string.
+        return valid(rows.objects().filter { it.str("word_type")=="short_play_name" }.map(::card))
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
         val values=VendorConstants.device.toMutableMap()
