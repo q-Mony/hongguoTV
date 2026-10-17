@@ -309,7 +309,8 @@ class ContentRepositoryTest {
         var requests=0
         val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":11,"data":[]}]}""" }
         assertThrows(IOException::class.java) { repo.search("修仙",1,ContentType.COMIC) }
-        assertEquals(2,requests)
+        // app attempt + website SSR + website suggestion
+        assertEquals(3,requests)
     }
 
     @Test fun comicSearchFallsBackToWebsiteWhenAppEndpointReturnsEmptyBody() {
@@ -321,7 +322,10 @@ class ContentRepositoryTest {
         }
         assertEquals("789",repo.search("修仙",1,ContentType.COMIC).items.single().id)
         assertEquals("/reading/bookapi/search/tab/v",paths.first())
-        assertTrue(paths.last().startsWith("/search/"))
+        assertTrue(paths.any { it.startsWith("/search/") })
+        // The suggestion source returned unparseable HTML here; its failure must not lose the SSR
+        // result or duplicate the single merged row.
+        assertTrue(paths.any { it.startsWith("/incent_resource/suggestion") })
     }
 
     @Test fun shortSearchKeepsWebsiteFallback() {
@@ -332,7 +336,28 @@ class ContentRepositoryTest {
             """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
         }
         assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
-        assertEquals(2,paths.size)
+        assertEquals(3,paths.size)
+    }
+
+    // New dramas can sit outside the fixed 10-row SSR list; the suggestion API surfaces them.
+    // The merge must union both sources, keep SSR order first, and dedupe by series id.
+    @Test fun websiteSearchMergesSuggestionResultsMissingFromTheSsrPage() {
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/search/%E5%87%A1%E4%BA%BA%E7%99%BE%E4%B8%96%E4%B9%A6" ->
+                    """<script>_ROUTER_DATA={"loaderData":{"search_(keyword)/page":{"isSuccess":true,"searchList":[{"name":"凡人百世书","video_data":{"series_id":7641246517595999257,"series_title":"凡人百世书","episode_cnt":81}}]}}}</script>"""
+                else -> JSONObject().put("suggest_list",JSONArray()
+                    .put(JSONObject().put("word_type","short_play_name").put("name","凡人百世书第八季")
+                        .put("video_data",JSONObject().put("series_id",7691717179049249854L).put("series_title","凡人百世书第八季").put("episode_cnt",112)))
+                    .put(JSONObject().put("word_type","short_play_name").put("name","凡人百世书")
+                        .put("video_data",JSONObject().put("series_id",7641246517595999257L).put("series_title","凡人百世书")))
+                    .put(JSONObject().put("word_type","actor_name").put("name","某演员"))).toString()
+            }
+        }
+        val result=repo.search("凡人百世书",1,ContentType.SHORT)
+        assertEquals(listOf("7641246517595999257","7691717179049249854"),result.items.map { it.id })
+        assertEquals("凡人百世书第八季",result.items[1].title)
+        assertFalse("non-series suggestion types must be filtered",result.items.any { it.title=="某演员" })
     }
 
     // Scheme B is the fallback: when scheme A's response carries no model, the request is retried
