@@ -1,0 +1,44 @@
+# Agent 备忘（项目约定）
+
+## 分支策略（用户指定，2026-10-16 起）
+
+- **`my-release` 是主分支**（远端 `origin/my-release`，由本地 `main` 推送而来）。
+  正式发布、版本提升、CI 发布流程都以它为准。本地 `main` 与它同源。
+- 远端 `origin/main`（eea73e6 旧 TV 发布线）**不再是主分支**；其内容已被
+  `my-release` 完整包含（超集），保留仅作历史参考，勿再向其推送。
+- 功能分支（保持各自功能，均须能播 1080P，均已合入播放接口修复）：
+  - `feature/series-speed-menu` —— 分集倍速菜单、缓冲指示延迟、搜索兜底
+  - `feature/mobile-downloads-touch` —— 手机下载 + 触摸播放控制
+  - `fix/play-api-recovery` —— 1080P 恢复的独立提交线
+
+## 功能归属（用户指定，2026-10-16 起）
+
+- **Download（手机下载）功能由 `feature/mobile-downloads-touch` 专属承载**：
+  其他功能分支不需要、也不得引入下载代码（`DownloadStore.kt`、「我的下载」
+  入口、下载选集等）；下载相关的改动只提交到该分支。
+- 现状事实（2026-10-16 起）：`my-release` 与本地 `main` **已移除**下载功能
+  （`DownloadStore.kt` 删除、`MainActivity.kt` 回退到合并前版本，触摸播放
+  控制随之一并移除）；主分支保留播放接口修复、倍速、缓冲延迟、搜索兜底。
+  下载相关改动只提交到 `feature/mobile-downloads-touch`，**不要**再把它
+  合并回 `my-release`，也不要扩散到 `feature/series-speed-menu` 或
+  `fix/play-api-recovery`。
+- 触摸播放控制（点击暂停/长按更多）随下载分支引入，同样只属于
+  `feature/mobile-downloads-touch`。
+
+## 版本规则
+
+- 所有分支的默认版本统一为 **versionCode 11 / versionName 0.9.2**，
+  不再使用 0.9.0 / versionCode 9。
+- CI 发布线版本为 `0.9.2+run_number`（versionCode = 10000 + run_number）。
+- `ReleaseVersionTest` 会守住默认 versionCode 必须大于上一发布版本（10）；
+  发布新版本时同步上调该测试里的 `lastReleasedVersionCode`。
+
+## 播放接口要点（详见 docs/research/2026-10-15-hongguo-play-api-recovery.md）
+
+- 高清取流只走 `POST /novel/player/multi_video_model/preload/v1/`，
+  `biz_param.video_platform` 必须为 1024。
+- 设备指纹（device_id/iid）按安装生成并持久化（SharedPreferences
+  `native-library-v1` 的 deviceId/installId/deviceRotatedAt），仅在两种签名
+  方案全部被拒后限频轮换（24h 一次）。
+- 签名方案 A（`Signer`，不发 x-medusa）为默认，方案 B（`FallbackSigner`，
+  onedrama 简化签名）为兜底；A 覆盖所有路由失败后才轮到 B。
