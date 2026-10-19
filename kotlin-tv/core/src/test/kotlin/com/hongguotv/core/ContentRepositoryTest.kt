@@ -358,6 +358,33 @@ class ContentRepositoryTest {
         assertEquals(listOf("7641246517595999257","7691717179049249854"),result.items.map { it.id })
         assertEquals("凡人百世书第八季",result.items[1].title)
         assertFalse("non-series suggestion types must be filtered",result.items.any { it.title=="某演员" })
+        assertEquals("merged list of 2 fits one page",1,result.totalPages)
+    }
+
+    // The footer shows 第 N / M 页 from the merged total; upstream never reports page counts.
+    @Test fun websiteSearchReportsTotalPagesOfTheMergedResult() {
+        val rows=JSONArray()
+        val suggest=JSONArray()
+        for(i in 1..13) {
+            rows.put(JSONObject().put("name","结果$i").put("video_data",JSONObject().put("series_id",7600000000000000000L+i).put("series_title","结果$i")))
+            suggest.put(JSONObject().put("word_type","short_play_name").put("name","结果$i")
+                .put("video_data",JSONObject().put("series_id",7600000000000000000L+i).put("series_title","结果$i")))
+        }
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/search/%E6%B5%8B%E8%AF%95" -> JSONObject().put("loaderData",JSONObject().put("search_(keyword)/page",
+                    JSONObject().put("isSuccess",true).put("searchList",rows))).toString().let { "<script>_ROUTER_DATA=$it</script>" }
+                else -> JSONObject().put("suggest_list",suggest).toString()
+            }
+        }
+        val first=repo.search("测试",1,ContentType.SHORT)
+        assertEquals(10,first.items.size)
+        assertEquals(2,first.totalPages)
+        assertTrue(first.hasMore)
+        val second=repo.search("测试",2,ContentType.SHORT)
+        assertEquals(3,second.items.size)
+        assertEquals(2,second.totalPages)
+        assertFalse(second.hasMore)
     }
 
     // Scheme B is the fallback: when scheme A's response carries no model, the request is retried
