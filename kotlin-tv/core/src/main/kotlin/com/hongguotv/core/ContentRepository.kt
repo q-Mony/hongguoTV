@@ -20,7 +20,7 @@ data class Series(val id: String, val title: String, val cover: String = "", val
 data class Detail(val series: Series, val episodes: List<String>)
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
-data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
+data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val totalPages: Int? = null)
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
@@ -74,7 +74,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
         val items=valid(rows.objects().map(::card))
         val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
-        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
+        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100),totalPages=minOf(lastPage,100))
     }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
@@ -94,8 +94,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(merged.isEmpty()) { ssr.exceptionOrNull()?.let { throw it }; return CatalogPage(emptyList(),false) }
         val all=merged.values.toList()
         val start=(page-1)*10
-        if(start>=all.size) return CatalogPage(emptyList(),false)
-        return CatalogPage(all.subList(start,minOf(start+10,all.size)),start+10<all.size)
+        if(start>=all.size) return CatalogPage(emptyList(),false,totalPages=(all.size+9)/10)
+        return CatalogPage(all.subList(start,minOf(start+10,all.size)),start+10<all.size,totalPages=(all.size+9)/10)
     }
     private fun websiteSsrSearch(keyword: String): List<Series> {
         val data=router("$site/search/${Signer.encode(keyword)}")

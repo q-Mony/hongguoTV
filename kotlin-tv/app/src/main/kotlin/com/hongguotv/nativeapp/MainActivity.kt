@@ -125,7 +125,8 @@ class MainActivity: Activity() {
     private var catalog=emptyList<Series>()
     private var hasMore=false
     private var catalogFocus=""
-    private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?)
+    private var totalPages:Int?=null
+    private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?,val totalPages: Int?=null)
     private var ranking: ComicRanking?=null
     private var rankRefresh: View?=null
     private var rankSubtitle: TextView?=null
@@ -283,8 +284,8 @@ class MainActivity: Activity() {
     }
     private fun switchTab(next: Int) {
         leaveCollection()
-        tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
-        tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
+        tabState[tab]=CatalogState(page,catalog,hasMore,ranking,totalPages); tabFocus[tab]=catalogFocus
+        tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; totalPages=saved?.totalPages; catalogFocus=tabFocus[next].orEmpty()
         showCatalog(load=(next<=2 && catalog.isEmpty() && (next!=1 || query.isNotBlank())))
     }
     private fun switchContentType(type: ContentType) {
@@ -294,13 +295,13 @@ class MainActivity: Activity() {
         library.contentType=type
         for(index in 0..1) { tabState.remove(index); tabFocus.remove(index) }
         releaseCatalogViews()
-        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; homePosition=null
+        page=1; catalog=emptyList(); hasMore=false; ranking=null; totalPages=null; catalogFocus=""; homePosition=null
         showCatalog(load=(tab==0 || query.isNotBlank()),focusType=true)
     }
     private fun leaveCollection() {
         if(collection==null) return
         collection=null
-        collectionReturn?.let { page=it.page; catalog=it.items; hasMore=it.hasMore; ranking=it.ranking }
+        collectionReturn?.let { page=it.page; catalog=it.items; hasMore=it.hasMore; ranking=it.ranking; totalPages=it.totalPages }
         catalogFocus=collectionFocus; collectionReturn=null
     }
     private fun showCollection(kind: String) {
@@ -417,9 +418,9 @@ class MainActivity: Activity() {
                 if(requestTab==0 && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
                 if(requestTab==0 && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
-                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; showCatalog() }
+                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; totalPages=result.totalPages; showCatalog() }
                 } else {
-                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
+                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; if(result.totalPages!=null) totalPages=result.totalPages
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
@@ -430,7 +431,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; rankSubtitle?.text="榜单加载失败"
+                catalog=emptyList(); hasMore=false; ranking=null; totalPages=null; rankSubtitle?.text="榜单加载失败"
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -503,7 +504,9 @@ class MainActivity: Activity() {
         var prev: View?=null; var next: View?=null
         if(tab<=2 || localCatalog()) {
             prev=addButton(paging,"上一页") { if(page>1) { page--; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
-            paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==2 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2) 135 else 95),dp(44)))
+            val knownTotal=if(tab==2 && ranking!=null) ranking!!.totalPages else totalPages
+            val pageLabel=if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(knownTotal!=null) "第 $page / $knownTotal 页" else "第 $page 页"
+            paging.addView(text(pageLabel,14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2 || knownTotal!=null) 150 else 95),dp(44)))
             next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
             if(collection=="hot" && !hasMore && collectionReturn?.hasMore==true) {
                 next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; showCatalog(true) }
@@ -724,7 +727,7 @@ class MainActivity: Activity() {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
         (searchInput as? EditText)?.let { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken,0) }
         if(library.contentType!=type) { library.contentType=type; for(index in 0..1) { tabState.remove(index); tabFocus.remove(index) } }
-        library.rememberSearch(clean,type); query=clean; tab=1; page=1; catalogFocus=""; showCatalog(true)
+        library.rememberSearch(clean,type); query=clean; tab=1; page=1; totalPages=null; catalogFocus=""; showCatalog(true)
     }
     private fun showSearchHistory(anchor: View) {
         val history=library.searches()
