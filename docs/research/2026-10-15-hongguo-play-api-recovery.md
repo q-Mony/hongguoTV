@@ -253,3 +253,21 @@ format_name=mov,mp4,m4a,3gp,3g2,mj2   duration=174.720000
 - 内容密钥与解密：[MediaCrypto.kt](work/hongguoTV/kotlin-tv/core/src/main/kotlin/com/hongguotv/core/MediaCrypto.kt)。
 - 固定签名测试向量：[signing.json](work/hongguoTV/kotlin-tv/core/src/test/resources/signing.json)。
 - 此前一轮接口调研：[2026-09-21-hongguo-open-source.md](work/hongguoTV/docs/research/2026-09-21-hongguo-open-source.md)。
+
+## 后记：2026-10-18 上游状态翻转（N3urda/hongguoTV PR #22/#23 触发复测）
+
+复测矩阵（真实 Kotlin 签名器、持久化的新随机设备、真实 episode id，各 3 次）：
+
+| 路由 | 无签名 | 方案 A（完整签名） | 方案 B（简化 gorgon） |
+| --- | --- | --- | --- |
+| `multi_video_model/v1/`（旧 batch） | **code=0 ✓** | code=0 ✓ | code=0 ✓ |
+| `multi_video_model/preload/v1/` | code=0 ✓ | code=0 ✓ | code=0 ✓ |
+| `video_model/v1/`（单集，单集体） | code=0 ✓ | — | — |
+
+结论修订：
+1. **旧 batch 路由已恢复**（本文写作时 10-15 判为"停供"）。上游在 10-15 至 10-18 之间修复或回滚了该问题。
+2. **播放接口当前不强制签名**——无签名 + 未标记设备即可取流。PR#22（FanchangWang）实测的正是这个状态。
+3. 本文 10-15 的结论（preload 唯一可用、需签名）在当时的观测窗口内成立，但**不是永久性事实**；上游状态会漂移。
+4. 我们实现的 `stream()` 是「路由 × 签名方案」二维降级链（A/preload → A/batch → B/preload → B/batch → 指纹轮换 → 公开 360P），对两种上游状态均免疫，无需改动。
+5. PR#23（注册设备 + 真实 Argus，+1309 行）经实测无必要：纯随机 19 位设备即可通过，无需 device_register。
+6. 偶发观测：同一路由同一签名曾出现单次「HTTP 200 空 body」，3 次复测正常——上游存在瞬时抽风，降级链的存在价值再次得到印证。
