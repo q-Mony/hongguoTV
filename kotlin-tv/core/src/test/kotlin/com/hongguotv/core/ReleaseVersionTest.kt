@@ -36,7 +36,7 @@ class ReleaseVersionTest {
     }
 
     /** The highest versionCode already published. Raise this only when a release is actually cut. */
-    private val lastReleasedVersionCode = 9L
+    private val lastReleasedVersionCode = 10L
 
     @Test fun defaultVersionCodeIsHigherThanTheLastRelease() {
         val current = defaultVersion("versionCode").toLong()
