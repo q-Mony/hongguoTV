@@ -13,10 +13,10 @@
 
 ## 版本规则
 
-- 所有分支的默认版本统一为 **versionCode 10 / versionName 0.9.1**，
+- 所有分支的默认版本统一为 **versionCode 11 / versionName 0.9.2**，
   不再使用 0.9.0 / versionCode 9。
-- CI 发布线版本为 `0.9.1+run_number`（versionCode = 10000 + run_number）。
-- `ReleaseVersionTest` 会守住默认 versionCode 必须大于上一发布版本（9）；
+- CI 发布线版本为 `0.9.2+run_number`（versionCode = 10000 + run_number）。
+- `ReleaseVersionTest` 会守住默认 versionCode 必须大于上一发布版本（10）；
   发布新版本时同步上调该测试里的 `lastReleasedVersionCode`。
 
 ## 播放接口要点（详见 docs/research/2026-10-15-hongguo-play-api-recovery.md）
