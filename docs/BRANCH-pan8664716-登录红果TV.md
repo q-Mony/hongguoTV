@@ -66,3 +66,5 @@ echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
 - 版本号与 versionCode 沿用 HGTV 的（1.2.2.2 / 53），未改动。
 - 正式签名密钥不在仓库中；缺少 `android/keystore.properties` 时回落到 debug 签名，构建不会失败。
+- **已移除友盟统计 SDK**（`com.umeng.umsdk`）与 `efs` APM 插桩插件：Kotlin 源码本来就没用到它们，
+  只在构建期做埋点。移除后 APK 减小约 50 KB，且不再向第三方上报任何使用数据。

@@ -20,7 +20,3 @@
 
 # Kotlin 反射与元数据。
 -keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod, RuntimeVisible*Annotations
-
-# 友盟 / 第三方 SDK 的入口。
--keep class com.umeng.** { *; }
--dontwarn com.umeng.**
