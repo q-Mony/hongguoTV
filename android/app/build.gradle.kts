@@ -1,7 +1,8 @@
 import java.util.Properties
 
 plugins { id("com.android.application"); kotlin("android") }
-apply(plugin = "com.efs.sdk.plugin")
+// efs（APM 插桩）插件来自私有仓库，不公开；拿不到时跳过它，应用逻辑不依赖它。
+val efsAvailable = runCatching { apply(plugin = "com.efs.sdk.plugin"); true }.getOrDefault(false)
 val signingProperties = Properties().apply { val config = rootProject.file("keystore.properties"); if (config.exists()) config.inputStream().use { load(it) } }
 fun signingValue(env: String, key: String): String? = System.getenv(env) ?: signingProperties.getProperty(key)
 
@@ -61,7 +62,8 @@ android {
 
 // efs 扩展由 APM 插件注册，字段没有 setter；Kotlin DSL 下按声明类反射写入。
 // 不写也能跑（默认全量插桩），显式限定白名单可避免给三方库插桩、控制包体积。
-run {
+// 插件不可用时整段跳过：没有它就没有插桩，功能不受影响。
+if (efsAvailable) run {
     val ext = extensions.getByName("efs")
     val extClass = Class.forName("com.efs.sdk.plugin.EfsExtension")
     fun put(name: String, value: Any?) {
@@ -79,8 +81,12 @@ dependencies {
     implementation("com.google.zxing:core:3.4.1")
     implementation("com.squareup.okhttp3:okhttp:3.12.13")
     implementation(project(":core")) { exclude(group = "org.json") }
-    implementation("com.google.android.exoplayer:exoplayer-core:2.19.1")
-    implementation("com.google.android.exoplayer:exoplayer-ui:2.19.1")
+    // 播放器用 media3：源码里的 import 是 `androidx.media3.*`，与这里一一对应。
+    // 钉 1.4.1 而不是 1.8.0：1.8.0 的 minSdk 是 21，本工程要支持 Android 4.4（minSdk 19）；
+    // 1.4.1 的 minSdk 正好是 19。旧的 `com.google.android.exoplayer` 2.19.1 包名是
+    // `com.google.android.exoplayer2.*`，与源码里的 import 对不上，不能用。
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
     implementation("com.umeng.umsdk:common:+")
     implementation("com.umeng.umsdk:asms:+")
     implementation("com.umeng.umsdk:apm:1.9.13")
